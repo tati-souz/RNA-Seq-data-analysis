@@ -1,0 +1,1902 @@
+---
+title: "Análise - Parkinson - DPcd vs DPsd vs CT"
+author: "Tatiane Piedade"
+date: "2022-09-11"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    code_folding: show
+    theme: united
+    highlight: textmate
+  pdf_document:
+    toc: yes
+editor_options:
+  chunk_output_type: console
+---
+### Samples
+DP S/ Discinesia   | DP C/ Discinesia   | Controle
+-----------------: | :---------------:  | :-------------:
+Masculino	8  | Masculino	11 | Masculino	13
+Feminino	3 |  Feminino	4 | Feminino	7
+Total	11 | Total	15 | Total	20
+
+```{r bibliotecas, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+library(readxl)
+library(dplyr)
+library(DESeq2)
+library(ggplot2)
+library(pheatmap)
+library(kableExtra)
+library(glmpca)
+library(patchwork)
+library(UpSetR)
+library(RColorBrewer)
+library(viridis)
+library(devtools)
+library(biomaRt)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(variancePartition)
+library(ggrepel)
+library(rstatix)
+library(gridExtra)
+library(cowplot)
+library(ReactomePA)
+library(stringr)
+library(multienrichjam)
+```
+
+### Sample Table
+```{r SampleTable}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+setwd("/Users/tatiane/Library/CloudStorage/OneDrive-UniversidadeFederaldoPará-UFPA/DOUTORADO/RESULTADOS_TRANSCRIPTOMA/Parkinson_Tati")
+
+# MODO 1 (Função do DESeq2)
+directory <- "/Users/tatiane/Library/CloudStorage/OneDrive-UniversidadeFederaldoPará-UFPA/DOUTORADO/RESULTADOS_TRANSCRIPTOMA/HtSeq_counts - Paired_Reads"
+#Tabela com os metadados
+metadata_parkinson <- read_excel("AMOSTRAS_TATI_nv.xlsx", sheet = "SampleTable2")
+#Criando a coluna de categorias para idade
+metadata_parkinson$age_category <- 0
+metadata_parkinson$age_category[metadata_parkinson$age >= 45 & metadata_parkinson$age <= 55] <- "45-55"
+metadata_parkinson$age_category[metadata_parkinson$age >= 56 & metadata_parkinson$age <= 65] <- "56-65"
+metadata_parkinson$age_category[metadata_parkinson$age >= 66 & metadata_parkinson$age <= 75] <- "66-75"
+
+metadata_parkinson$age_start <- 0
+metadata_parkinson$age_start[metadata_parkinson$AgeFirstSympt >= 50] <- "less50"
+metadata_parkinson$age_start[metadata_parkinson$AgeFirstSympt < 50] <- "greater50"
+
+#Tabela para referência dos dados arquivos de contagem
+sampleFiles <- grep("htseq.count",list.files(directory),value=TRUE)
+sampleCondition <- sub("...._htseq.count*","\\1",sampleFiles)
+sampleTable <- data.frame(sampleName = sub("_htseq.count*","\\1",sampleFiles),
+                          fileName = sampleFiles,
+                          condition = sampleCondition)
+
+# Juntando metadados na tabela de referência dos arquivos de contagem
+sampleTable = sampleTable %>% right_join(metadata_parkinson[c(1:46),], by = c("sampleName"="sampleName"))
+
+#Transformando em fator
+sampleTable$condition <- as.factor(sampleTable$condition)
+sampleTable$groups <- as.factor(sampleTable$groups)
+sampleTable$age_category <- as.factor(sampleTable$age_category)
+sampleTable$sex <- as.factor(sampleTable$sex)
+sampleTable$SeqBatch <- as.factor(sampleTable$SeqBatch)
+sampleTable$age_start <- as.factor(sampleTable$age_start)
+sampleTable$HousePest <- as.factor(sampleTable$HousePest)
+sampleTable$HighHousePest <- as.factor(sampleTable$HighHousePest)
+
+# Normalizando a idade para fazer o dds
+sampleTable$age <- scale(sampleTable$age)
+sampleTable$age <- as.numeric(sampleTable$age)
+sampleTable$LEDD <- scale(sampleTable$LEDD)
+sampleTable$LEDD <- as.numeric(sampleTable$LEDD)
+sampleTable$DiseaseDuration <- scale(sampleTable$DiseaseDuration)
+sampleTable$DiseaseDuration <- as.numeric(sampleTable$DiseaseDuration)
+
+#SAMPLETABLE_GERAL
+kableExtra::kable(sampleTable, caption = "REFERENCE TABLE")  %>% kable_paper() %>% scroll_box(width = "100%", height = "500px")
+
+save(sampleTable, file = "./Rdata/sample_table.RData")
+
+sampleTable_disc <- sampleTable[21:46,]
+```
+### Sample table - Men
+```{r echo=FALSE, include=FALSE}
+#SAMPLETABLE_MASCULINO
+sampleTable_man <- sampleTable[sampleTable$sex == 'Male',]
+kableExtra::kable(sampleTable_man, caption = "REFERENCE TABLE - MAN") %>% kable_paper() %>% scroll_box(width = "100%", height = "100%")
+
+save(sampleTable_man, file = "./Rdata/sample_table_MAN.RData")
+```
+### Sample table - Women
+```{r echo=FALSE, include=FALSE}
+#SAMPLETABLE_FEMININO
+sampleTable_woman <- sampleTable[sampleTable$sex == 'Female',]
+kableExtra::kable(sampleTable_woman, caption = "REFERENCE TABLE - WOMAN") %>% kable_paper() %>% scroll_box(width = "100%", height = "100%")
+
+save(sampleTable_woman, file = "./Rdata/sample_table_WOMAN.RData")
+```
+### Dados gerais
+```{r Descrição dos Dados, echo=TRUE, collapse=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+###############################################################################
+##################### Discinesia
+dp_disc <- metadata_parkinson[metadata_parkinson$groups=="DP_dyskinesia",]
+# Idade
+summary(dp_disc$age)
+# Idade de inicio da doença
+summary(dp_disc$AgeFirstSympt)
+# Duração da doença
+summary(dp_disc$DiseaseDuration)
+# Tempo de L-DOPA
+summary(dp_disc$TimeLDOPA)
+# Dose de L-DOPA
+summary(dp_disc$DoseLDOPA)
+# LEDD
+summary(dp_disc$LEDD)
+# Exposição a pesticida
+table(dp_disc$HousePest)
+# Alta exposição a pesticidas
+table(dp_disc$HighHousePest)
+
+##################### Sem Discinesia
+dp_no_disc <- metadata_parkinson[metadata_parkinson$groups=="DP_no_dyskinesia",]
+# Idade
+summary(dp_no_disc$age)
+# Idade de inicio da doença
+summary(dp_no_disc$AgeFirstSympt)
+# Duração da doença
+summary(dp_no_disc$DiseaseDuration)
+# Tempo de L-DOPA
+summary(dp_no_disc$TimeLDOPA)
+# Dose de L-DOPA
+summary(dp_no_disc$DoseLDOPA)
+# LEDD
+summary(dp_no_disc$LEDD)
+# Exposição a pesticida
+table(dp_no_disc$HousePest)
+# Alta exposição a pesticidas
+table(dp_no_disc$HighHousePest)
+
+##################### Controle
+control <- metadata_parkinson[metadata_parkinson$groups=="control",]
+# Idade
+summary(control$age)
+# Exposição a pesticida
+table(control$HousePest)
+# Alta exposição a pesticidas
+table(control$HighHousePest)
+
+```
+### Análise estatística geral
+```{r Análise estatística geral, echo=TRUE, collapse=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+# Comparação para Sexo entre os 3 grupos --> p = 0.8698 / fisher p = 0.9239
+tb <- table(metadata_parkinson$sex, metadata_parkinson$groups)
+chisq.test(tb) 
+fisher.test(tb)
+
+# Comparação de idade da coleta entre os 3 grupos (Usando a mediana - Kruskal-W) --> p = 0.2289
+kruskal.test(age ~ groups, data = metadata_parkinson)
+
+# Comparando a idade de inicio da doença entre PD-D e PD-ND --> p = 0.042
+wilcox.test(dp_disc$AgeDiagn, dp_no_disc$AgeDiagn)
+
+# Comparando a duração da doença entre PD-D e PD-ND --> p = 0.03971
+wilcox.test(dp_disc$DiseaseDuration, dp_no_disc$DiseaseDuration)
+
+# Comparando o LEDD entre PD-D e PD-ND --> p = 0.001
+wilcox.test(dp_disc$LEDD, dp_no_disc$LEDD)
+
+# Comparando Dose de Levodopa entre PD-D e PD-ND --> p = 0.003262
+wilcox.test(dp_disc$DoseLDOPA, dp_no_disc$DoseLDOPA)
+
+# Comparando o tempo de Levodopa entre PD-D e PD-ND --> p = 0.000146
+wilcox.test(dp_disc$TimeLDOPA, dp_no_disc$TimeLDOPA)
+
+# Comparação para exposição a pesticida entre os 3 grupos --> p = 0.08516 / fisher: p = 0.1096
+tb <- table(metadata_parkinson$HousePest, metadata_parkinson$groups)
+chisq.test(tb) 
+fisher.test(tb)
+
+# Comparação para exposição a pesticida entre os 3 grupos --> p = 0.03809 / fisher: p = 0.04243
+tb <- table(metadata_parkinson$HighHousePest, metadata_parkinson$groups)
+chisq.test(tb) 
+fisher.test(tb)
+
+```
+
+------------------------------------------------------------------------------
+------------------------------------------------------------------------------
+
+# _ANÁLISE: DPcd vs DPsd vs CT (Não separado por sexo)_
+
+* DESeq design - from HTseq count
+* Design: ~ groups + sex + SeqBatch
+
+* Objeto DDS - Design ~ DPcd.DPsd.CT + sex + SeqBatch + age
+
+```{r dds_Geral, echo=TRUE, collapse=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+ddsHTSeq <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable,
+                                       directory = directory,
+                                       design = ~ groups + sex + SeqBatch + age)
+ddsHTSeq
+
+counts_DP<- as.data.frame(counts(ddsHTSeq))
+#write.table(counts_DP, "./Resultados_subDP/age_sex_batch/Matriz_Counts_DP.txt")
+
+# Mantendo pelo menos 5 amostras com uma contagem de 5 ou mais leituras
+keep <- rowSums(counts(ddsHTSeq) >= 5) >= 5
+dds <- ddsHTSeq[keep,]
+dds
+
+counts_DP_filtered <- as.data.frame(counts(dds))
+counts_DP_filtered$Gene_ID <- rownames(counts_DP_filtered)
+counts_DP_filtered <- counts_DP_filtered[,c(47,1:46)]
+
+#write.table(counts_DP_filtered, "./Resultados_subDP/age_sex_batch/Matriz_filtered_counts_DPcd.DPsd.CT.txt")
+
+#write.csv(counts_DP_filtered, "./Resultados_subDP/age_sex_batch/Matriz_filtered_counts_DPcd.DPsd.CT.csv")
+
+#save(counts_DP, counts_DP_filtered, sampleTable, file="./dados_dp.RData")
+```
+
+### Teste de covariáveis - Variance Partition
+
+```{r Variance partition, fig.align='center', fig.height = 5, fig.width = 8, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+meta <- sampleTable
+form <- ~ (1|condition) + (1|sex) + (1|SeqBatch) + (1|age_category) + (1|groups) + age
+isexpr <- rowSums(fpm(dds)>1) >= 0.5 * ncol(dds)
+quantLog <- log2( fpm(dds)[isexpr,] + 1)
+varPart <- fitExtractVarPartModel( quantLog, form, meta)
+vp <- sortCols( varPart ) # sort variables (i.e. columns) by median fraction
+plotVarPart( vp ) #violin plot of contribution of each variable to total variance
+```
+
+### Distribuição das amostras
+
+```{r Clusterização, fig.align='center', fig.height = 5, fig.width = 8, colapse=TRUE, echo=TRUE}
+### Clusterizarção hierárquica ------------------------------------------------
+vsd <- vst(dds, blind=FALSE)
+counts_genes_vst <- assay(vsd) # Matriz de counts transformados
+counts_genes_vst_t <- t(counts_genes_vst) # Transpor matriz de counts transformados
+rownames(counts_genes_vst_t) <- sampleTable$groups # Setar nomes dos grupos
+d <- dist(as.matrix(counts_genes_vst_t), method = "euclidean")# ClusterizaçãoHierárquica
+clusters <- hclust(d, method = "complete")
+par(mar = c(1, 1, 1, 1)) # Plotar
+plot(clusters) 
+
+```
+
+### PCA
+
+```{r PCA, fig.align='center', fig.height = 5, fig.width = 8, colapse=FALSE, echo=TRUE}
+# PCA - Função Geral para criar o PCA
+plot_pca <- function(pcaData,group){
+
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+pcaPlot <- ggplot(pcaData, aes(x = PC1, y = PC2, color = group)) +
+geom_point(size =3) +
+xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+ggtitle(paste("PCA",group))
+
+pcaPlot + ggrepel::geom_label_repel(aes(label = name),
+                  box.padding   = 0.35,
+                  point.padding = 0.5,
+                  segment.color = 'grey50',
+ show.legend = F)
+}
+#####################################################################
+### Preparando 3 TRANSFORMAÇÕES PCA (VSD, RLD e GLM) - PARA CONDITION
+vsd <- vst(dds, blind = FALSE)
+pcaData_vsd <- plotPCA(vsd, intgroup=c("groups"), returnData=TRUE)
+
+rld <- rlog(dds, blind = FALSE)
+pcaData_rld <- plotPCA(rld, intgroup=c("groups"), returnData=TRUE)
+
+gpca <- glmpca(counts(dds), L=3)
+gpca.dat <- gpca$factors
+gpca.dat$group <- dds$groups
+gpca.dat$name <- rownames(gpca.dat)
+names(gpca.dat) <- c("PC1","PC2","PC3","group","name")
+
+# Usando a função para as 3 transformações
+# VSD
+p1 <- plot_pca(pcaData = pcaData_vsd, group=c("groups")) +
+  ggtitle("VSD") + labs(color="Groups")
+p1
+#ggsave("./Resultados_subDP/age_sex_batch/PCA_BothSexes_VSD.png", plot = p1, width = 10, height = 6, dpi = 600)
+
+# RLD
+p2 <- plot_pca(pcaData = pcaData_rld, group=c("groups")) +
+  ggtitle("RLD") + labs(color="Groups")
+p2
+#ggsave("./Resultados_subDP/age_sex_batch/PCA_BothSexes_RLD.png", plot = p2, width = 10, height = 6, dpi = 600)
+
+# GLM
+p3 <- plot_pca(pcaData = gpca.dat, group=c("groups")) +
+  ggtitle("GLM") + labs(color="Groups") + xlab("PC1") + ylab("PC2")
+p3
+#ggsave("./Resultados_subDP/age_sex_batch/PCA_BothSexes_GLM.png", plot = p3, width = 10, height = 6, dpi = 600)
+
+#######################################
+##########. 3 dimensões.  #############
+
+library(scatterplot3d)
+library(rgl)
+
+dds <- DESeq(dds)
+vsd <- vst(dds, blind = FALSE)
+pca_result <- prcomp(assay(vsd))
+pcaData <- as.data.frame(pca_result[["rotation"]])
+pcaData$Groups <- sampleTable$groups
+
+colors <- c("indianred1", "green3", "dodgerblue")
+colors <- colors[as.numeric(pcaData$Groups)]
+scp <- scatterplot3d(pcaData[,1:3], pch = 16, color=colors, grid=TRUE, box=FALSE)
+legend("topright", legend = levels(pcaData$Groups), fill = unique(colors), title = "Groups",x.intersp = 0.3, cex = 0.7)
+
+plot(pcaData[,1:2], col= colors)
+
+rld <- rlog(dds, blind = FALSE)
+pca_result_rld <- prcomp(assay(rld))
+
+# Converter o gráfico do ggplot2 para 3D usando a função plot3d do rgl
+rgl::open3d()
+rgl::plot3d(pcaData$PC1, pcaData$PC2, pcaData$PC3, col = colors, size = 6,
+            xlab = "PC1", ylab = "PC2", zlab = "PC3")
+
+```
+
+### Biblioteca
+
+```{r Avaliação das bibliotecas, fig.align='center', fig.height = 5, fig.width = 8, colapse=FALSE, echo=TRUE}
+# Verificando a profundidade de sequenciamento
+hist <- ggplot2::qplot(colnames(dds), colSums(DESeq2::counts(dds)), geom = "col", fill = dds$groups) + ggtitle("") + 
+    labs(x = "Sample", y = "Library Size", fill="Groups") +
+    scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 0))
+hist
+ggsave("./Resultados_subDP/age_sex_batch/Library_Size.png", plot = hist, width = 10, height = 6, dpi = 600)
+
+# Sex
+hist2 <- ggplot2::qplot(colnames(dds), colSums(DESeq2::counts(dds)), geom = "col", fill = dds$sex) + ggtitle("") + 
+    labs(x = "Sample", y = "Library Size", fill="sex") +
+    scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 0))
+hist2
+ggsave("./Resultados_subDP/age_sex_batch/Library_Size-Sex.png", plot = hist2, width = 10, height = 6, dpi = 600)
+
+# SeqBatch
+hist3 <- ggplot2::qplot(colnames(dds), colSums(DESeq2::counts(dds)), geom = "col", fill = dds$SeqBatch) + ggtitle("") + 
+    labs(x = "Sample", y = "Library Size", fill="SeqBatch") +
+    scale_y_continuous(labels = function(x) format(x, scientific = FALSE)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 0))
+hist3
+ggsave("./Resultados_subDP/age_sex_batch/Library_Size-Batch.png", plot = hist3, width = 10, height = 6, dpi = 600)
+```
+
+### DESeq | Cook | Distribuição das amostras
+
+```{r Cook, fig.align='center', fig.height = 8, fig.width = 15, colapse=FALSE, echo=TRUE}
+
+dds <- DESeq(dds)
+results(dds)
+resultsNames(dds)
+
+# boxplot das distâncias de Cook
+boxplot(log10(assays(dds)[["cooks"]]), range=0, las=2) 
+
+```
+
+### Violino Plot - distribuição dos counts
+
+```{r ViolinoPlot, fig.align='center', fig.height = 5, fig.width = 8, colapse=FALSE, echo=TRUE}
+### Verificando a distribuição dos counts 
+# entre as condições (DPcd, DPsd, CT)
+res <- results(dds)
+d <- plotCounts(dds, gene=which.min(res$padj), intgroup="groups", 
+                returnData=TRUE)
+d1 <- ggplot(d, aes(x=groups, y=count, color = groups)) + 
+  geom_violin(trim = F) + 
+  scale_y_log10(breaks=c(0,10,25,100))
+d1 <- d1 + geom_point(position=position_jitter(w=0.1,h=0)) + 
+  ggtitle("Counts Distribuition - Groups")
+d1
+#ggsave("./Resultados_subDP/age_sex_batch/Counts_Distribuition.png", plot = d1, 
+#       width = 8, height = 6, dpi = 600)
+
+
+# entre o sexo
+d <- plotCounts(dds, gene=which.min(res$padj), intgroup="sex", 
+                returnData=TRUE)
+d1 <- ggplot(d, aes(x=sex, y=count, color = sex)) + 
+  geom_violin(trim = F) + 
+  scale_y_log10(breaks=c(0,10,25,100))
+d1 <- d1 + geom_point(position=position_jitter(w=0.1,h=0)) + 
+  ggtitle("Counts Distribuition - Sex")
+d1
+
+# entre batch
+d <- plotCounts(dds, gene=which.min(res$padj), intgroup="SeqBatch", 
+                returnData=TRUE)
+d1 <- ggplot(d, aes(x=SeqBatch, y=count, color = SeqBatch)) + 
+  geom_violin(trim = F) + 
+  scale_y_log10(breaks=c(0,10,25,100))
+d1 <- d1 + geom_point(position=position_jitter(w=0.1,h=0)) + 
+  ggtitle("Counts Distribuition - Batch")
+d1
+```
+
+# _Resultado: DP com discinesia vs Controle_
+14 genes
+
+```{r res1-DPd-CT, collapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+dds <- DESeq(dds)
+
+res1 <- results(dds, contrast = c("groups","DP_dyskinesia","control"))
+
+write.table(res1, "./Resultados_subDP/age_sex_batch/ResultDeseq_DPd_vs_CT.txt", quote = F)
+
+res1_df <- as.data.frame(res1)
+
+mcols(res1)$description
+summary(res1, 0.05)
+
+res1_table <- as.data.frame(res1) %>%
+  dplyr::filter(padj < 0.05) %>% 
+    mutate(
+    padj = ifelse(is.na(padj), 1, padj),
+    signif = 
+      case_when(
+        padj <= 0.05 & log2FoldChange < 0 ~ "Downregulated",
+        padj <= 0.05 & log2FoldChange > 0 ~ "Upregulated")) %>%
+  as.data.frame()
+
+res1_ordered <- res1_table[order(res1_table$log2FoldChange,decreasing = T),]
+
+# Ajustando o tempo de resposta: definir a URL de destino
+url <- "http://www.ensembl.org"
+timeout_sec <- 200
+curl_options <- httr::config(ssl_verifypeer = FALSE, ssl_verifyhost = FALSE, timeout = timeout_sec)
+httr::GET(url, config = curl_options)
+
+######################################################
+# BiomaRt - Convertendo o nome dos transcritos em simbolo de genes
+# Tentar buscar os símbolos dos genes até funcionar o acesso
+success <- FALSE
+while (!success) {
+  tryCatch({
+    ensembl <- useMart("ENSEMBL_MART_ENSEMBL")  
+    datasets <- listDatasets(ensembl)           
+    ensembl <- useDataset(dataset = "hsapiens_gene_ensembl", mart = ensembl)
+    atributos <- listAttributes(ensembl)
+    filtros <- listFilters(ensembl)
+    success <- TRUE
+  }, error = function(e) {
+    message("Erro: ", e$message)
+  })
+}
+#######################################################
+
+# Convertendo o nome dos transcritos em simbolo de genes
+idsx <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id"),
+             filters = "ensembl_gene_id",
+             values = rownames(res1_ordered),
+             mart = ensembl)
+
+names(idsx) = c("ensembl","gene","entrez")
+
+idsx$entrez[c(6,7,9:13)] <- ""
+
+res1_ordered$ensembl <- rownames(res1_ordered)
+
+# Há um gene no resultado que não aparece em idsx --> ENSG00000269028 (Adicionar esse gene e idsx)
+x <- idsx$ensembl
+y <- res1_ordered$ensembl
+n <- setdiff(y,x)
+n
+nova_linha <- res1_ordered["ENSG00000269028",]
+nova_linha$gene <- ""
+nova_linha$entrez <- ""
+nova_linha <- nova_linha[,c(8,9,10,1:7)]
+rownames(nova_linha) <- "14"
+
+res1_ordered <- left_join(idsx, res1_ordered, by="ensembl")
+res1_ordered <- rbind(res1_ordered,nova_linha)
+res1_ordered <- res1_ordered[order(res1_ordered$log2FoldChange,decreasing = T),]
+
+# Adicionar tipo de transcrito
+genes_ensembl <- read.table("mart_export csv.txt", sep = ",", header = T)
+genes_ensembl <- genes_ensembl[,c(1,5)]
+names(genes_ensembl) <- c("ensembl","Gene Type")
+head(genes_ensembl)
+res1_ordered <- left_join(res1_ordered, genes_ensembl, by = "ensembl") %>% unique()
+
+#write.csv(res1_ordered, "./Resultados_subDP/age_sex_batch/DEG_GERAL_DYS.CT_sexo_batch_age[14 DEG].csv")
+
+#Criando uma lista com os DEGs
+DEG_CTvsDPd_mas.fem = res1_ordered$ensembl
+length(DEG_CTvsDPd_mas.fem)
+
+Genes_CT.vs.Dyskinesia = kableExtra::kable(res1_ordered, caption = "D.E.G. Geral - DP-Dyskinesia vs Control") %>% kable_paper() %>% scroll_box(width = "100%", height = "100%")
+Genes_CT.vs.Dyskinesia
+
+lista1DEG_a <- as.data.frame(res1_ordered)
+```
+
+### Volcano
+
+```{r VolcanoPlot1, fig.align='center', fig.height = 4, fig.width = 7, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# VOLCANOPLOT - DEG Geral ##########################
+dataframe <- data.frame(log2FoldChange = res1$log2FoldChange,
+                        padj = res1$padj)
+dataframe$significant <- ifelse(dataframe$padj < 0.05, "Yes", "No")
+
+# Define o valor de log2FoldChange para o recorte dos pontos extremos
+log2fc_cutoff <- 1
+
+# Ajustando res1_ordered > adicionar o valor de ensembl quando gene estiver em branco
+for (i in 1:nrow(res1_ordered)) {
+  # verificar se a linha está em branco
+  if (res1_ordered[i,2] == "") {
+    # adicionar o valor da coluna ao lado
+    res1_ordered[i,2] <- res1_ordered[i,1]
+  }
+}
+
+# Cria um novo dataframe contendo somente os pontos extremos
+extreme_genes <- data.frame(log2FoldChange = res1_ordered$log2FoldChange,
+                        padj = res1_ordered$padj, 
+                        gene_name = res1_ordered$gene)
+
+# Cria um novo dataframe somente com as informações relevantes para a adição dos nomes
+gene_labels <- data.frame(
+  gene_name = extreme_genes$gene_name,
+  log2FoldChange = extreme_genes$log2FoldChange,
+  padj = extreme_genes$padj
+)
+gene_labels$significant <- ifelse(gene_labels$padj < 0.05, "Yes", "No")
+
+# Cria o gráfico com os pontos extremos e adiciona os nomes dos genes
+volcano <- ggplot(dataframe, aes(x=log2FoldChange, y=-log10(padj), color=significant)) + 
+  geom_point(alpha=0.6, size=1.5) +
+  theme_bw() +
+  scale_color_manual(values=c("azure4", "darkorange")) +
+  geom_vline(xintercept=c(-1, 1), linetype="dashed", size=0.2) +
+  geom_hline(yintercept=-log10(0.05), linetype="dashed", size=0.2) +
+  xlab("Log2 Fold Change") +
+  ylab("-Log10 Adjusted P-value") +
+  ggtitle("Volcano Plot - DPcd vs CT") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text_repel(data = gene_labels, aes(label=ifelse(abs(log2FoldChange) > 0.2 & padj < 0.05, gene_name,'')),
+                  hjust = -0.1, vjust = 0, 
+                  show.legend = F, size = 4,
+                  direction = "y", min.segment.length = 0,
+                  fontface = "bold")
+volcano
+
+#ggsave("./Resultados_subDP/age_sex_batch/VolcanoPlot_Geral_DPcd_CT.png", plot = volcano, 
+#       width = 8, height = 6, dpi = 600)
+```
+
+### Boxplot - Expressão dos genes D.E. entre os grupos
+
+```{r Boxplot1 DEG, fig.align='center', fig.height = 15, fig.width = 20, colapse=FALSE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+#########################################################################################
+# Sem os rótulos 
+#########################################################################################
+genes_de <- res1_ordered[,1:2]
+plot_list <- list()
+
+for (gene in genes_de[,1]) {
+   d <- plotCounts(dds, gene= gene, intgroup="groups", returnData=TRUE)
+   # Gráfico individual
+   d1 <- ggplot(d, aes(x=groups, y=count, color = groups)) + 
+   geom_boxplot(trim = F) + 
+   scale_y_log10(breaks=c(0,10,50,100)) +
+   geom_point(position=position_jitter(w=0.1,h=0)) +
+   ggtitle(res1_ordered[res1_ordered$ensembl==gene,2]) +
+   theme(legend.position = "none", axis.text.x = element_blank(), axis.title.x = element_blank(),
+          axis.text = element_text(size = 5), plot.title = element_text(size = 10))
+   
+   plot_list[[gene]] <- d1
+}
+
+# Combina todos os gráficos usando cowplot::plot_grid()
+combined_plot <- cowplot::plot_grid(plotlist = plot_list, nrow = 2)
+
+# Criar uma legenda de cores separada
+legend <- get_legend(ggplot(data.frame(groups = unique(d$groups)), aes(x = 1, y = groups, color = groups)) +
+  geom_point(show.legend = TRUE) +
+  theme(legend.position = "bottom"))
+# Adicionar apenas uma legenda de cores
+combined_plot <- cowplot::plot_grid(combined_plot, legend, ncol = 1, nrow = 2, rel_heights = c(7, 1))
+combined_plot
+
+ggsave("./Resultados_subDP/age_sex_batch/BoxPlot_DEG_DPcd_CT.png", plot = combined_plot, 
+       width = 18, height = 12, dpi = 600)
+
+#########################################################################################
+# Com os rótulos 
+#########################################################################################
+genes_de <- res1_ordered[,1:2]
+plot_list <- list()
+all_counts <- data.frame()
+
+for (gene in genes_de[,1]) {
+   d <- plotCounts(dds, gene= gene, intgroup="groups", returnData=TRUE)
+   
+   # Adicionar uma coluna com o nome do gene
+   d$Gene <- gene
+  
+  # Armazenar os dados de count do gene atual no dataframe all_counts
+   all_counts <- rbind(all_counts, d)
+  
+   # Gráfico individual
+   d1 <- ggplot(d, aes(x=groups, y=count, color = groups)) + 
+   geom_boxplot(trim = F) + 
+   scale_y_log10(breaks=c(0,10,50,100)) +
+   geom_point(position=position_jitter(w=0.1,h=0)) +
+   ggtitle(res1_ordered[res1_ordered$ensembl==gene,2]) +
+   theme(legend.position = "none", axis.text.x = element_blank(), axis.title.x = element_blank(),
+          axis.text = element_text(size = 5), plot.title = element_text(size = 10))
+   d1 <- d1 + ggrepel::geom_label_repel(aes(label = rownames(d)),
+                  box.padding   = 0.35,
+                  point.padding = 0.5,
+                  segment.color = 'grey50',
+                  show.legend = F,
+                  size = 2)
+   plot_list[[gene]] <- d1
+}
+
+# Combina todos os gráficos usando cowplot::plot_grid()
+combined_plot <- cowplot::plot_grid(plotlist = plot_list, nrow = 2)
+
+# Criar uma legenda de cores separada
+legend <- get_legend(ggplot(data.frame(groups = unique(d$groups)), aes(x = 1, y = groups, color = groups)) +
+  geom_point(show.legend = TRUE) +
+  theme(legend.position = "bottom"))
+# Adicionar apenas uma legenda de cores
+combined_plot <- cowplot::plot_grid(combined_plot, legend, ncol = 1, nrow = 2, rel_heights = c(7, 1))
+combined_plot
+
+ggsave("./Resultados_subDP/age_sex_batch/BoxPlot_WithNames_DEG_DPcd_CT.png", plot = combined_plot, 
+       width = 18, height = 12, dpi = 600)
+```
+
+### Enriquecimento (GSEA) - CT x DP-D
+
+```{r Enriquecimento GSEA, fig.align='center', fig.height = 7, fig.width = 10, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# criar um vetor nomeado com o conjunto não filtrado - Preparando os dados
+res_anno <- res1_df %>% 
+  dplyr::mutate(., symbol = AnnotationDbi::mapIds(org.Hs.eg.db,keys=row.names(res1_df),
+                                                  column="SYMBOL",keytype="ENSEMBL", 
+                                                  multiVals="first"),
+                entrez = AnnotationDbi::mapIds(org.Hs.eg.db,keys=row.names(res1_df),
+                                               column="ENTREZID",keytype="ENSEMBL", 
+                                               multiVals="first"))
+genelist <- res_anno$log2FoldChange
+names(genelist) = as.character(res_anno$entrez)
+genelist = sort(genelist, decreasing = TRUE)
+
+##############################################
+########### GSEA REACTOME ####################
+# METABOLIC PATHWAY
+
+# GSEA #
+
+react1 <- gsePathway(genelist, 
+                pvalueCutoff = 0.2,
+                pAdjustMethod = "BH", 
+                verbose = FALSE)
+
+# Ajustando a tabela de resultados para salvar e visualizar # 
+
+      react1_df <- react1@result
+      react1_df <- react1_df[react1_df$p.adjust < 0.05,]
+
+      # Função para mapear Entrez IDs para símbolos de gene
+      map_entrez_to_symbol <- function(entrez_ids) {
+        gene_symbols <- mapIds(org.Hs.eg.db, keys = entrez_ids, keytype = "ENTREZID", column = "SYMBOL")
+        return(gene_symbols)
+      }
+
+      # Aplicar a função de mapeamento para cada linha da tabela de resultados
+      react2_df <- react1_df
+      react2_df$SymbolGenes <- sapply(strsplit(react2_df$core_enrichment, "/"), map_entrez_to_symbol)
+      react2_df$SymbolGenes <- gsub(", ", "/", react2_df$SymbolGenes)
+
+      # Usando regex para extrair apenas os símbolos de gene
+      symbol_genes <- sapply(strsplit(react2_df$SymbolGenes, "/"), function(pair) {
+        symbols <- sapply(pair, function(item) {
+          symbol <- gsub("`[0-9]+` = \"([A-Z0-9]+)\"", "\\1", item)
+          return(symbol)
+        })
+        symbols <- symbols[symbols != ""]
+        return(paste(symbols, collapse = "/"))
+      })
+      
+      # Substituir a coluna SymbolGenes pelos símbolos extraídos
+      react2_df$SymbolGenes <- symbol_genes
+      react2_df$SymbolGenes <- gsub("c\\(|\\)", "", react2_df$SymbolGenes)
+      react2_df$SymbolGenes <- gsub("\\`....\\`", "", react2_df$SymbolGenes)
+      react2_df$SymbolGenes <- gsub(" = ", "", react2_df$SymbolGenes)
+
+      #write.csv(react2_df, "./Resultados_subDP/age_sex_batch/GSEA_REACTOME_DP-D.csv")
+      
+      # Mostrar dataframe GO
+      GSEA_REACTOME_DYS.vs.CT = kableExtra::kable(react2_df, caption = "GSEA REACTOME Geral - DYS.vs.CT - 47 vias") %>% kable_paper() %>% scroll_box(width = "800px", height = "500px")
+      GSEA_REACTOME_DYS.vs.CT
+
+# Barplot
+
+    barplot_df <- react2_df[,c(2,4)]
+    barplot_df <- barplot_df[order(barplot_df$enrichmentScore, decreasing = T),]
+    # Removendo a via de receptores scavengers por ser comum em PD-ND
+
+    bar <- ggplot(barplot_df, aes(x = enrichmentScore, y = reorder(Description, enrichmentScore))) +
+      geom_bar(stat = "identity", fill = "blue") +
+      labs(title = "GSEA - Metabolic Pathways - DP-D vs CT",
+           x = "Enrichment Score",
+           y = "Metabolic Pathways") +
+      theme_minimal()
+    bar
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_DP-D_Barplot.png", plot = bar, 
+       width = 12, height = 8, dpi = 600)
+
+# Cnetplot
+
+    # Selecionar vias
+
+    react2_obj <- react2_df
+    colnames(react2_obj)[12] <- "geneID"
+    react2_obj <- react2_df[order(react2_obj$enrichmentScore, decreasing = T),]
+    
+    ViasUP <- react2_obj[1:5,]
+    ViasDown <- react2_obj[33:37,]
+    
+    # Transformar em objeto de enriquecimento
+    
+    ViasUP_obj <- enrichDF2enrichResult(ViasUP)
+    
+    ViasDown_obj <- enrichDF2enrichResult(ViasDown)
+
+    # Criando uma lista de FC
+    FClist_symbol <- res_anno$log2FoldChange
+    names(FClist_symbol) = as.character(res_anno$symbol)
+    FClist_symbol = sort(FClist_symbol, decreasing = TRUE)
+    
+# VIAS UP
+    cnet_up <- cnetplot(ViasUP_obj, title = "GSEA - Metabolic Process - UP",
+             cex.params = list(category_label = 0.6, gene_label = 0.6),
+             color.params = list(foldChange = FClist_symbol,
+                                 category="green3"),
+             layout = "fr",
+             circular = F,
+             colorEdge = F
+             )
+    cnet_up
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_UP_DP-D_Cnetplot.png", plot = cnet_up,width = 12, height = 8, dpi = 600)
+
+# VIAS DOWN
+    cnet_down <- cnetplot(ViasDown_obj, title = "GSEA - Metabolic Process - DOWN",
+             cex.params = list(category_label = 0.6, gene_label = 0.6),
+             color.params = list(foldChange = FClist_symbol,
+                                 category="green3"),
+             layout = "dh",
+             circular = F,
+             colorEdge = F
+             )
+    cnet_down
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_DOWN_DP-D_Cnetplot.png", plot = cnet_down,width = 10, height = 8, dpi = 600)
+  
+  # Foco nas mitocondriais
+ViasDown_mito <- react2_df[grep("Mitochondrial", react2_df$Description),]
+ViasDown_obj_mito <- enrichDF2enrichResult(ViasDown_mito)
+cnet_down <- cnetplot(ViasDown_obj_mito, title = "GSEA - Metabolic Process - DOWN",
+             cex.params = list(category_label = 0.6, gene_label = 0.6),
+             color.params = list(foldChange = FClist_symbol,
+                                 category="green3"),
+             layout = "dh",
+             circular = F,
+             colorEdge = F
+             )
+    cnet_down
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_DOWN_MITO_DP-D_Cnetplot.png", plot = cnet_down,width = 10, height = 8, dpi = 600)
+
+# Heatplot
+heat <- heatplot(ViasUP_obj, foldChange=FClist_symbol, showCategory = 5)
+heat
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_ViasUp_DP-D_Heatplot.png", plot = heat, 
+       width = 13, height = 6, dpi = 600)
+heat <- heatplot(ViasDown_obj, foldChange=FClist_symbol, showCategory = 5)
+heat
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_ViasDown_DP-D_Heatplot.png", plot = heat, 
+       width = 13, height = 6, dpi = 600)
+
+
+######################################################
+########### GSEA CLUSTERPROFILLER ####################
+# BIOLOGICAL PROCESS - GENE FUNCTION
+
+# GSEA
+
+ego3_BP <- clusterProfiler::gseGO(geneList = genelist,
+                               OrgDb = org.Hs.eg.db,
+                               ont = "BP",
+                               minGSSize = 100,
+                               maxGSSize = 500,
+                               pvalueCutoff = 0.05,
+                               verbose = FALSE)
+    # Tabela de resultados
+    gsea_BP <- ego3_BP@result
+    gsea_BP <- gsea_BP[gsea_BP$pvalue < 0.05,]
+    
+# Ajustando a tabela de resultados para salvar e visualizar # 
+    
+# Função para mapear Entrez IDs para símbolos de gene
+      map_entrez_to_symbol <- function(entrez_ids) {
+        gene_symbols <- mapIds(org.Hs.eg.db, keys = entrez_ids, keytype = "ENTREZID", column = "SYMBOL")
+        return(gene_symbols)
+      }
+
+      # Aplicar a função de mapeamento para cada linha da tabela de resultados
+      gsea1_BP <- gsea_BP
+      gsea1_BP$SymbolGenes <- sapply(strsplit(gsea1_BP$core_enrichment, "/"), map_entrez_to_symbol)
+      gsea1_BP$SymbolGenes <- gsub(",", "/", gsea1_BP$SymbolGenes)
+
+      # Usando regex para extrair apenas os símbolos de gene
+      symbol_genes <- sapply(strsplit(gsea1_BP$SymbolGenes, "/"), function(pair) {
+      symbols <- sapply(pair, function(item) {
+        symbol <- gsub("`[0-9]+` = \"([A-Z0-9]+)\"", "\\1", item)
+        return(symbol)
+      })
+      symbols <- symbols[symbols != ""]
+      return(paste(symbols, collapse = "/"))
+    })
+      
+      # Substituir a coluna SymbolGenes pelos símbolos extraídos
+      gsea1_BP$SymbolGenes <- symbol_genes
+      gsea1_BP$SymbolGenes <- gsub("c\\(|\\)", "", gsea1_BP$SymbolGenes)
+      gsea1_BP$SymbolGenes <- gsub("\`4824\` = \"NKX3-1\"", "NKX3-1", gsea1_BP$SymbolGenes)
+      
+      #write.csv(gsea1_BP, "./Resultados_subDP/age_sex_batch/GSEA_ClustTProf_BP.csv")
+    
+# Mostrar dataframe GO
+GSEA_BP_TABLE = kableExtra::kable(gsea1_BP[,1:11], caption = "GSEA BP Cluster Profiller - 15 vias") %>%
+  kable_paper() %>% scroll_box(width = "800px", height = "500px")
+GSEA_BP_TABLE
+
+# Barplot
+
+    barplot_df <- gsea_BP[,c(2,4)]
+    barplot_df <- gsea_BP[order(gsea_BP$enrichmentScore, decreasing = T),]
+    
+    bar <- ggplot(gsea_BP, aes(x = enrichmentScore, y = reorder(Description, enrichmentScore))) +
+      geom_bar(stat = "identity", fill = "blue") +
+      labs(title = "GSEA - Biological Process",
+           x = "Enrichment Score",
+           y = "Biological Processes") +
+      theme_minimal()
+    bar
+    ggsave("./Resultados_subDP/age_sex_batch/GSEA_ClustProf_BP_DP-D_Barplot.png", plot = bar, 
+           width = 12, height = 8, dpi = 600)
+
+# GSEAplot
+
+    # Selecionar vias 
+    gsea1_BP_obj <- gsea1_BP
+    colnames(gsea1_BP_obj)[12] <- "geneID"
+    gsea1_BP_obj <- gsea1_BP_obj[order(gsea1_BP_obj$enrichmentScore, decreasing = T),]
+    
+    gsea1_BP_Up_obj <- gsea1_BP_obj[1:5,]
+    
+    gsea1_BP_Down_obj <- gsea1_BP_obj[18:22,]
+    
+    # Transformar em objeto de enriquecimento
+    gsea1_BP_obj <- enrichDF2enrichResult(gsea1_BP_obj)
+    
+    gsea1_BP_Up_obj <- enrichDF2enrichResult(gsea1_BP_Up_obj)
+    
+    gsea1_BP_Down_obj <- enrichDF2enrichResult(gsea1_BP_Down_obj)
+    
+    # Crie a pasta se ela não existir
+    out_GSEA_BP <- "./Resultados_subDP/GSEA_ClustProf_BP"
+    if (!dir.exists(out_GSEA_BP)) {
+      dir.create(out_GSEA_BP)
+    }
+    
+    plot_list1 <- list()
+    
+    for (via in gsea1_BP_obj$Description) {
+      GSEA_plot <- enrichplot::gseaplot(ego3_BP,
+                         geneSetID = 1,
+                         by = "runningScore",
+                         title = gsea1_BP_obj$Description[via])
+      plot_list1[[via]] <- GSEA_plot
+  
+  # Gere o nome do arquivo para salvar com base no índice do loop
+  filename <- paste0("GSEA_BP_", via, ".png")
+  
+  # Caminho completo para o arquivo de saída
+  output_path <- file.path(out_GSEA_BP, filename)
+  
+  # Salve a figura no caminho especificado
+  ggsave(output_path, GSEA_plot, width = 12, height = 10, dpi = 300)
+}
+
+# Cnetplot
+
+# Geral
+    # Criando uma lista de FC
+    FClist_symbol <- res_anno$log2FoldChange
+    names(FClist_symbol) = as.character(res_anno$symbol)
+    FClist_symbol = sort(FClist_symbol, decreasing = TRUE)
+    
+    cnet <- cnetplot(gsea1_BP_obj, title = "GSEA - Biological Process",
+             cex.params = list(category_label = 0.6, gene_label = 0.6),
+             color.params = list(foldChange = FClist_symbol,
+                                 category="green3"),
+             layout = "kk",
+             circular = F,
+             colorEdge = F
+             )
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_ClustProf_BP_Cnetplot.png", plot = cnet, 
+       width = 8, height = 6, dpi = 600)
+
+# Up
+cnet_up <- cnetplot(gsea1_BP_Up_obj, title = "GSEA - Biological Process - Up EnrichmentScores",
+             cex.params = list(category_label = 0.6, gene_label = 0.6),
+             color.params = list(foldChange = FClist_symbol,
+                                 category="green3"),
+             layout = "kk",
+             circular = F,
+             colorEdge = F
+             )
+    cnet_up
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_ClustProf_BP_Up_Cnetplot.png", plot = cnet_up, 
+       width = 8, height = 6, dpi = 600)
+# Down
+cnet_down <- cnetplot(gsea1_BP_Down_obj, title = "GSEA - Biological Process - Down EnrichmentScores",
+             cex.params = list(category_label = 0.6, gene_label = 0.6),
+             color.params = list(foldChange = FClist_symbol,
+                                 category="green3"),
+             layout = "kk",
+             circular = F,
+             colorEdge = F
+             )
+    cnet_down
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_ClustProf_BP_Down_Cnetplot.png", plot = cnet_down, 
+       width = 8, height = 6, dpi = 600)
+
+# Heatplot
+heat <- heatplot(gsea1_BP_Up_obj, foldChange=FClist_symbol, showCategory = 5)
+heat
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_ClustProf_BP_UP_Heatplot.png", plot = heat, 
+       width = 16, height = 6, dpi = 600)
+heat <- heatplot(gsea1_BP_Down_obj, foldChange=FClist_symbol, showCategory = 5)
+heat
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_ClustProf_BP_DOWN_Heatplot.png", plot = heat, 
+       width = 16, height = 6, dpi = 600)
+```
+
+### Enriquecimento (SEA - GO) - Para os 14 DEG
+
+```{r Enriquecimento DP-D vs CT, fig.align='center', fig.height = 7, fig.width = 10, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+##############################################
+############ SEA - Enriquecimento ############
+
+genes_ensembl <- res1_ordered$ensembl
+genes_symbol <- ifelse(res1_ordered$gene == "", NA, res1_ordered$gene)
+gene_symbol <- genes_symbol[!is.na(genes_symbol)]
+
+## SEA GO
+go_enrich <- enrichGO(
+  gene = genes_ensembl,
+  OrgDb = "org.Hs.eg.db",
+  ont = "BP",
+  pvalueCutoff = 0.5,
+  qvalueCutoff = 0.5,
+  pAdjustMethod = "BH",
+  keyType = 'ENSEMBL',
+  readable = T
+)
+
+# Obter dataframe com os resultados GO
+df_go <- go_enrich@result
+df_go <- df_go[df_go$pvalue < 0.05,]
+#write.csv(df_go, "./Resultados_subDP/age_sex_batch/GO_Geral_DYS.vs.CT_[14_DEG].csv")
+
+# Mostrar dataframe GO
+GO_DYS.vs.CT = kableExtra::kable(df_go, caption = "GO Geral - DYS.vs.CT - 91 vias") %>% kable_paper() %>% scroll_box(width = "100%", height = "100%")
+GO_DYS.vs.CT
+
+# Barplot - GO
+bar <- barplot(go_enrich,
+        drop = TRUE, 
+        showCategory = 10, 
+        title = "GO Biological Pathways - Barplot")
+bar
+ggsave("./Resultados_subDP/age_sex_batch/GO_BothSexes_Dys-CT_Barplot.png", plot = bar, 
+       width = 8, height = 6, dpi = 600)
+
+# Dotplot - GO
+dot <- dotplot(go_enrich, showCategory = 10,  
+               title = "GO Biological Pathways - Dotplot")
+dot
+ggsave("./Resultados_subDP/age_sex_batch/GO_BothSexes_Dys-CT_Dotplot.png", plot = dot, 
+       width = 8, height = 6, dpi = 600)
+
+# Cnetplot - GO
+FClist <- res1_ordered[res1_ordered$gene != "",c(5)]
+names(FClist) <- res1_ordered[res1_ordered$gene != "",c(2)]
+class(FClist)
+cnet <- cnetplot(go_enrich, title = "GO Biological Pathways - Cnetplot",
+         cex.params = list(category_label = 0.7, gene_label = 0.8),
+         color.params = list(foldChange = FClist,
+                             category="green3"),
+         layout = "kk",
+         circular = F,
+         colorEdge = F
+         )
+cnet
+ggsave("./Resultados_subDP/age_sex_batch/GO_BothSexes_Dys-CT_Cnetplot.png", plot = cnet, 
+       width = 8, height = 6, dpi = 600)
+
+# Heatplot
+heatplot(go_enrich, foldChange=FClist, showCategory = 20, )
+ggsave("./Resultados_subDP/age_sex_batch/GO_BothSexes_Dys-CT_Heatplot.png", plot = cnet, 
+       width = 8, height = 6, dpi = 600)
+
+# Emapplot - GO
+x <- pairwise_termsim(go_enrich)
+emap <- emapplot(x, layout = "kk",cex.params = list(category_label = 0.7), 
+                 title = "GO Biological Pathways - Emapplot")
+emap
+ggsave("./Resultados_subDP/age_sex_batch/GO_BothSexes_Dys-CT_Emapplot.png", plot = emap, 
+       width = 8, height = 6, dpi = 600)
+
+```
+
+# _Resultado: DP sem discinesia vs Controle_
+16 genes
+
+```{r res2-DPnd-CT, collapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+res2 <- results(dds, contrast = c("groups","DP_no_dyskinesia","control"))
+
+res2_df <- as.data.frame(res2)
+
+mcols(res2)$description 
+summary(res2, 0.05)
+
+res2_table <- as.data.frame(res2) %>%
+  dplyr::filter(padj < 0.05) %>% 
+    mutate(
+    padj = ifelse(is.na(padj), 1, padj),
+    signif = 
+      case_when(
+        padj <= 0.05 & log2FoldChange < 0 ~ "Downregulated",
+        padj <= 0.05 & log2FoldChange > 0 ~ "Upregulated")) %>%
+  as.data.frame()
+
+res2_ordered <- res2_table[order(res2_table$log2FoldChange,decreasing = T),]
+
+# Convertendo o nome dos transcritos em simbolo de genes
+idsx <- getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"),
+             filters = "ensembl_gene_id",
+             values = rownames(res2_ordered),
+             mart = ensembl)
+
+names(idsx) = c("ensembl","gene")
+res2_ordered$ensembl <- rownames(res2_ordered)
+res2_ordered <- left_join(idsx, res2_ordered, by="ensembl")
+res2_ordered <- res2_ordered[order(res2_ordered$log2FoldChange,decreasing = T),]
+
+# Adicionar tipo de transcrito
+genes_ensembl <- read.table("mart_export csv.txt", sep = ",", header = T)
+genes_ensembl <- genes_ensembl[,c(1,5)]
+names(genes_ensembl) <- c("ensembl","Gene Type")
+head(genes_ensembl)
+res2_ordered <- left_join(res2_ordered, genes_ensembl, by = "ensembl") %>% unique()
+
+#save(res2_ordered, file = "./Rdata/res_geral_NODYSvsCT.RData")
+#write.csv(res2_ordered, "./Resultados_subDP/age_sex_batch/DEG_GERAL_noDYS.CT_sexo_batch_age[16 DEG].csv")
+
+#Criando uma lista com os DEGs
+DEG_CTvsDPsd_mas.fem = res2_ordered$ensembl
+length(DEG_CTvsDPsd_mas.fem)
+
+Genes_CT.vs.NoDyskinesia = kableExtra::kable(res2_ordered, caption = "D.E.G. Geral - DP-no-dyskinesia vs Control") %>% kable_paper() %>% scroll_box(width = "100%", height = "100%")
+Genes_CT.vs.NoDyskinesia
+
+lista2DEG_a <- as.data.frame(res2_ordered)
+```
+
+### Volcano
+
+```{r VolcanoPlot2, fig.align='center', fig.height = 4, fig.width = 7, colapse=TRUE, echo=TRUE}
+# VOLCANOPLOT - DEG Geral ##########################
+dataframe <- data.frame(log2FoldChange = res2$log2FoldChange,
+                        padj = res2$padj)
+dataframe$significant <- ifelse(dataframe$padj < 0.05, "Yes", "No")
+
+# Define o valor de log2FoldChange para o recorte dos pontos extremos
+log2fc_cutoff <- 1
+
+# Ajustando res1_ordered > adicionar o valor de ensembl quando gene estiver em branco
+for (i in 1:nrow(res2_ordered)) {
+  # verificar se a linha está em branco
+  if (res2_ordered[i,2] == "") {
+    # adicionar o valor da coluna ao lado
+    res2_ordered[i,2] <- res2_ordered[i,1]
+  }
+}
+
+# Cria um novo dataframe contendo somente os pontos extremos
+extreme_genes <- data.frame(log2FoldChange = res2_ordered$log2FoldChange,
+                        padj = res2_ordered$padj, 
+                        gene_name = res2_ordered$gene)
+
+# Cria um novo dataframe somente com as informações relevantes para a adição dos nomes
+gene_labels <- data.frame(
+  gene_name = extreme_genes$gene_name,
+  log2FoldChange = extreme_genes$log2FoldChange,
+  padj = extreme_genes$padj
+)
+gene_labels$significant <- ifelse(gene_labels$padj < 0.05, "Yes", "No")
+
+# Cria o gráfico com os pontos extremos e adiciona os nomes dos genes
+volcano <- ggplot(dataframe, aes(x=log2FoldChange, y=-log10(padj), color=significant)) + 
+  geom_point(alpha=0.6, size=1.5) +
+  theme_bw() +
+  scale_color_manual(values=c("azure4", "darkorange")) +
+  geom_vline(xintercept=c(-1, 1), linetype="dashed", size=0.2) +
+  geom_hline(yintercept=-log10(0.05), linetype="dashed", size=0.2) +
+  xlab("Log2 Fold Change") +
+  ylab("-Log10 Adjusted P-value") +
+  ggtitle("Volcano Plot - DPsd vs CT") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_text_repel(data = gene_labels, aes(label=ifelse(abs(log2FoldChange) > 0.2 & padj < 0.05, gene_name,'')),
+                  hjust = -0.1, vjust = 0, 
+                  show.legend = F, size = 4,
+                  direction = "y", min.segment.length = 0,
+                  fontface = "bold")
+volcano
+
+ggsave("./Resultados_subDP/age_sex_batch/VolcanoPlot_Geral_DPsd_CT.png", plot = volcano, 
+       width = 8, height = 6, dpi = 600)
+```
+
+### BoxPlot - Expressão dos genes D.E. entre DP-ND e CT
+
+```{r Boxplot2 DEG, fig.align='center', fig.height = 15, fig.width = 20, colapse=TRUE, echo=TRUE}
+genes_de <- res2_ordered[,1:2]
+plot_list <- list()
+
+for (gene in genes_de[,1]) {
+   d <- plotCounts(dds, gene= gene, intgroup="groups", returnData=TRUE)
+   # Gráfico individual
+   d1 <- ggplot(d, aes(x=groups, y=count, color = groups)) + 
+   geom_boxplot(trim = F) + 
+   scale_y_log10(breaks=c(0,10,25,100)) +
+   geom_point(position=position_jitter(w=0.1,h=0)) +
+   ggtitle(res2_ordered[res2_ordered$ensembl==gene,2]) +
+   theme(legend.position = "none", axis.text.x = element_blank(), axis.title.x = element_blank(),
+          axis.text = element_text(size = 5), plot.title = element_text(size = 10))
+
+   plot_list[[gene]] <- d1
+}
+
+# Combina todos os gráficos usando cowplot::plot_grid()
+combined_plot <- cowplot::plot_grid(plotlist = plot_list, nrow = 2)
+
+# Criar uma legenda separada
+legend <- get_legend(ggplot(data.frame(groups = unique(d$groups)), aes(x = 1, y = groups, color = groups)) +
+  geom_point(show.legend = TRUE) +
+  theme(legend.position = "bottom"))
+# Adicionar apenas uma legenda de cores
+combined_plot <- cowplot::plot_grid(combined_plot, legend, ncol = 1, nrow = 2, rel_heights = c(7, 1))
+combined_plot
+
+ggsave("./Resultados_subDP/age_sex_batch/BoxPlot_DEG_DPsd_CT.png", plot = combined_plot, 
+       width = 18, height = 12, dpi = 600)
+```
+
+### Enriquecimento (GSEA) - CT x DP-ND
+
+```{r Enriquecimento GSEA, fig.align='center', fig.height = 7, fig.width = 10, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# criar um vetor nomeado com o conjunto não filtrado - Preparando os dados
+res_anno <- res2_df %>% 
+  dplyr::mutate(., symbol = AnnotationDbi::mapIds(org.Hs.eg.db,keys=row.names(res2_df),
+                                                  column="SYMBOL",keytype="ENSEMBL", 
+                                                  multiVals="first"),
+                entrez = AnnotationDbi::mapIds(org.Hs.eg.db,keys=row.names(res2_df),
+                                               column="ENTREZID",keytype="ENSEMBL", 
+                                               multiVals="first"))
+genelist <- res_anno$log2FoldChange
+names(genelist) = as.character(res_anno$entrez)
+genelist = sort(genelist, decreasing = TRUE)
+
+##############################################
+########### GSEA REACTOME ####################
+# METABOLIC PATHWAY
+
+# GSEA #
+
+react1 <- gsePathway(genelist, 
+                pvalueCutoff = 0.2,
+                pAdjustMethod = "BH", 
+                verbose = FALSE)
+
+# Ajustando a tabela de resultados para salvar e visualizar # 
+
+      react1_df <- react1@result
+      react1_df <- react1_df[react1_df$p.adjust < 0.05,]
+
+      # Função para mapear Entrez IDs para símbolos de gene
+      map_entrez_to_symbol <- function(entrez_ids) {
+        gene_symbols <- mapIds(org.Hs.eg.db, keys = entrez_ids, keytype = "ENTREZID", column = "SYMBOL")
+        return(gene_symbols)
+      }
+
+      # Aplicar a função de mapeamento para cada linha da tabela de resultados
+      react3_df <- react1_df
+      react3_df$SymbolGenes <- sapply(strsplit(react3_df$core_enrichment, "/"), map_entrez_to_symbol)
+      react3_df$SymbolGenes <- gsub(", ", "/", react3_df$SymbolGenes)
+
+      # Usando regex para extrair apenas os símbolos de gene
+      symbol_genes <- sapply(strsplit(react3_df$SymbolGenes, "/"), function(pair) {
+        symbols <- sapply(pair, function(item) {
+          symbol <- gsub("`[0-9]+` = \"([A-Z0-9]+)\"", "\\1", item)
+          return(symbol)
+        })
+        symbols <- symbols[symbols != ""]
+        return(paste(symbols, collapse = "/"))
+      })
+      
+      # Substituir a coluna SymbolGenes pelos símbolos extraídos
+      react3_df$SymbolGenes <- symbol_genes
+      react3_df$SymbolGenes <- gsub("c\\(|\\)", "", react3_df$SymbolGenes)
+      react3_df$SymbolGenes <- gsub("\\`....\\`", "", react3_df$SymbolGenes)
+      react3_df$SymbolGenes <- gsub(" = ", "", react3_df$SymbolGenes)
+
+      #write.csv(react3_df, "./Resultados_subDP/age_sex_batch/GSEA_REACTOME_DP-ND.csv")
+      
+      # Mostrar dataframe GO
+      GSEA_REACTOME_DYS.vs.CT = kableExtra::kable(react3_df, caption = "GSEA REACTOME Geral - DYS.vs.CT - 47 vias") %>% kable_paper() %>% scroll_box(width = "800px", height = "500px")
+      GSEA_REACTOME_DYS.vs.CT
+
+# Barplot
+
+    barplot_df <- react2_df[,c(2,4)]
+    barplot_df <- barplot_df[order(barplot_df$enrichmentScore, decreasing = T),]
+
+    bar <- ggplot(barplot_df, aes(x = enrichmentScore, y = reorder(Description, enrichmentScore))) +
+      geom_bar(stat = "identity", fill = "blue") +
+      labs(title = "GSEA - Metabolic Pathways - DP-ND vs CT",
+           x = "Enrichment Score",
+           y = "Metabolic Pathways") +
+      theme_minimal()
+    bar
+#ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_DP-ND_Barplot.png", plot = bar, width = 12, height = 8, dpi = 600)
+
+# Cnetplot
+
+    # Selecionar vias
+
+    react2_obj <- react2_df
+    colnames(react2_obj)[12] <- "geneID"
+    react2_obj <- react2_df[order(react2_obj$enrichmentScore, decreasing = T),]
+    
+    ViasUP <- react2_obj[1:5,]
+    ViasDown <- react2_obj[48:49,]
+    
+    # Transformar em objeto de enriquecimento
+    react2_obj <- enrichDF2enrichResult(react2_obj)
+    
+    ViasUP_obj <- enrichDF2enrichResult(ViasUP)
+    
+    ViasDown_obj <- enrichDF2enrichResult(ViasDown)
+
+    # Criando uma lista de FC
+    FClist_symbol <- res_anno$log2FoldChange
+    names(FClist_symbol) = as.character(res_anno$symbol)
+    FClist_symbol = sort(FClist_symbol, decreasing = TRUE)
+    
+# GERAL - 5 primeiras (UP)
+    cnet <- cnetplot(react2_obj, title = "GSEA - Metabolic Process",
+             cex.params = list(category_label = 0.6, gene_label = 0.6),
+             color.params = list(foldChange = FClist_symbol,
+                                 category="green3"),
+             layout = "kk",
+             circular = F,
+             colorEdge = F
+             )
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_DP-ND_Cnetplot.png", plot = cnet, 
+       width = 8, height = 6, dpi = 600)
+
+# VIAS UP
+    cnet_up <- cnetplot(ViasUP_obj, title = "GSEA - Metabolic Process - UP",
+             cex.params = list(category_label = 0.6, gene_label = 0.6),
+             color.params = list(foldChange = FClist_symbol,
+                                 category="green3"),
+             layout = "kk",
+             circular = F,
+             colorEdge = F
+             )
+    cnet_up
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_UP_DP-ND_Cnetplot.png", plot = cnet_up,
+       width = 12, height = 8, dpi = 600)
+
+# VIAS DOWN
+    cnet_down <- cnetplot(ViasDown_obj, title = "GSEA - Metabolic Process - DOWN",
+             cex.params = list(category_label = 0.6, gene_label = 0.6),
+             color.params = list(foldChange = FClist_symbol,
+                                 category="green3"),
+             layout = "dh",
+             circular = F,
+             colorEdge = F
+             )
+    cnet_down
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_DOWN_DP-ND_Cnetplot.png", plot = cnet_down,width = 10, height = 8, dpi = 600)
+
+# Heatplot
+heat <- heatplot(ViasUP_obj, foldChange=FClist_symbol, showCategory = 5)
+heat
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_ViasUp_DP-ND_Heatplot.png", plot = heat, 
+       width = 13, height = 6, dpi = 600)
+heat <- heatplot(ViasDown_obj, foldChange=FClist_symbol, showCategory = 5)
+heat
+ggsave("./Resultados_subDP/age_sex_batch/GSEA_REACTOME_MP_ViasDown_DP-ND_Heatplot.png", plot = heat, 
+       width = 13, height = 6, dpi = 600)
+
+
+```
+
+### Enriquecimento (GO)
+
+```{r Enriquecimento DP-ND vs CT, fig.align='center', fig.height = 7, fig.width = 10, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+genes_ensembl <- res2_ordered$ensembl
+genes_symbol <- ifelse(res2_ordered$gene == "", NA, res2_ordered$gene)
+gene_symbol <- genes_symbol[!is.na(genes_symbol)]
+
+########### Enriquecimento comum ##############
+go_enrich <- enrichGO(
+  gene = genes_ensembl,
+  OrgDb = "org.Hs.eg.db",
+  ont = "BP",
+  pvalueCutoff = 0.5,
+  qvalueCutoff = 0.5,
+  pAdjustMethod = "BH",
+  keyType = 'ENSEMBL',
+  readable = T
+)
+# Obter dataframe com os resultados GO
+df_go <- go_enrich@result
+df_go <- df_go[df_go$pvalue < 0.05,]
+write.csv(df_go, "./Resultados_subDP/age_sex_batch/GO_Geral_noDYS.vs.CT.csv")
+# Mostrar dataframe GO
+GO_DYS.vs.CT = kableExtra::kable(df_go, caption = "GO Geral - NoDYS.vs.CT - 63 vias") %>% kable_paper() %>% scroll_box(width = "100%", height = "100%")
+GO_DYS.vs.CT
+
+# Barplot - GO
+bar <- barplot(go_enrich,
+        drop = TRUE, 
+        showCategory = 10, 
+        title = "GO Biological Pathways - Barplot")
+bar
+ggsave("./Resultados_subDP/age_sex_batch/GO_BothSexes_noDys-CT_Barplot.png", plot = bar, 
+       width = 8, height = 6, dpi = 600)
+
+# Dotplot - GO
+dot <- dotplot(go_enrich, showCategory = 10,  
+               title = "GO Biological Pathways - Dotplot")
+dot
+ggsave("./Resultados_subDP/age_sex_batch/GO_BothSexes_noDys-CT_Dotplot.png", plot = dot, 
+       width = 8, height = 6, dpi = 600)
+
+# Cnetplot - GO
+# Ajustando o nome dos genes mitocondriais (MT-ND5...) de acordo com o resultado do GO (ND5...)
+res2_ordered_cnet <- res2_ordered %>% 
+  mutate(gene = gsub("MT-", "", gene)) %>%
+  mutate(gene = sub("CYB", "CYTB", gene))
+FClist <- res2_ordered_cnet[res2_ordered_cnet$gene != "",c(4)]
+names(FClist) <- res2_ordered_cnet[res2_ordered_cnet$gene != "",c(2)]
+class(FClist)
+cnet <- cnetplot(go_enrich, title = "GO Biological Pathways - Cnetplot",
+         cex.params = list(category_label = 0.7, gene_label = 0.8),
+         color.params = list(foldChange = FClist,
+                             category="green3"),
+         layout = "fr",
+         circular = F,
+         colorEdge = F
+         )
+cnet
+ggsave("./Resultados_subDP/age_sex_batch/GO_BothSexes_noDys-CT_Cnetplot.png", plot = cnet, 
+       width = 8, height = 6, dpi = 600)
+
+# Emapplot - GO
+x <- pairwise_termsim(go_enrich)
+emap <- emapplot(x, layout = "kk",cex.params = list(category_label = 0.7), 
+                 title = "GO Biological Pathways - Emapplot")
+emap
+ggsave("./Resultados_subDP/age_sex_batch/GO_BothSexes_noDys-CT_Emapplot.png", plot = emap, width = 8, height = 6, dpi = 600)
+```
+
+# _Resultado: DP com discinesia vs DP sem discinesia_
+0 genes
+
+```{r res3-DPd-DPnd, collapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+ddsHTSeq <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable_disc,
+                                       directory = directory,
+                                       design = ~ groups + sex + SeqBatch + 
+                                         age + LEDD + DiseaseDuration)
+ddsHTSeq
+
+# Mantendo pelo menos 5 amostras com uma contagem de 5 ou mais leituras
+keep <- rowSums(counts(ddsHTSeq) >= 5) >= 5
+dds <- ddsHTSeq[keep,]
+dds
+
+#DESEQ
+dds <- DESeq(dds)
+resultsNames(dds)
+
+# DISCINESIA X SEM DISCINESIA
+res3 <- results(dds, contrast = c("groups","DP_dyskinesia","DP_no_dyskinesia"))
+
+mcols(res3)$description
+summary(res3, 0.05)
+
+```
+
+### BoxPlot - Expressão dos genes D.E. entre DP-D e DP-ND
+
+```{r Boxplot3 DEG, colapse=TRUE, echo=TRUE}
+genes_de <- res3_ordered[,1:2]
+plot_list <- list()
+
+# Definir as cores para cada grupo
+colors <- c("DP_dyskinesia" = "springgreen3", "DP_no_dyskinesia" = "steelblue2")
+            
+for (gene in genes_de[,1]) {
+   d <- plotCounts(dds, gene= gene, intgroup="groups", returnData=TRUE)
+   # Gráfico individual
+   d1 <- ggplot(d, aes(x=groups, y=count, color = groups)) + 
+   geom_boxplot(trim = F) + 
+   scale_y_log10(breaks=c(0,10,25,100)) +
+   geom_point(position=position_jitter(w=0.1,h=0)) +
+   ggtitle(res3_ordered[res3_ordered$ensembl==gene,2]) +
+   theme(legend.position = "none", axis.text.x = element_blank(), axis.title.x = element_blank())
+   # Definir as cores para cada grupo
+   d1 <- d1 + scale_color_manual(values = colors)
+   
+   plot_list[[gene]] <- d1
+}
+
+# Combina todos os gráficos usando cowplot::plot_grid()
+combined_plot <- cowplot::plot_grid(plotlist = plot_list, nrow = 1)
+
+# Criar uma legenda separada
+legend <- get_legend(ggplot(data.frame(groups = unique(d$groups)), aes(x = 1, y = groups, color = groups)) +
+  geom_point(show.legend = TRUE) +
+  scale_color_manual(values = colors) +
+  theme(legend.position = "left"))
+
+# Adicionar apenas uma legenda de cores
+combined_plot <- cowplot::plot_grid(combined_plot, legend, ncol = 2, rel_widths = c(4, 1))
+combined_plot
+
+ggsave("./Resultados_subDP/age_sex_batch/BoxPlot_DEG_DPd_DPsd.png", plot = combined_plot, 
+       width = 8, height = 6, dpi = 600)
+
+################################################################################################
+############ Plotando os 2 genes para os 3 grupos ##############
+ddsHTSeq <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable,
+                                       directory = directory,
+                                       design = ~ groups + sex + SeqBatch + age)
+keep <- rowSums(counts(ddsHTSeq) >= 5) >= 5
+dds <- ddsHTSeq[keep,]
+dds
+#DESEQ
+dds <- DESeq(dds)
+resultsNames(dds)
+# Definir as cores para cada grupo
+colors <- c("control" = "indianred1", "DP_dyskinesia" = "springgreen3", "DP_no_dyskinesia" = "steelblue2")
+            
+for (gene in genes_de[,1]) {
+   d <- plotCounts(dds, gene= gene, intgroup="groups", returnData=TRUE)
+   # Gráfico individual
+   d1 <- ggplot(d, aes(x=groups, y=count, color = groups)) + 
+   geom_boxplot(trim = F) + 
+   scale_y_log10(breaks=c(0,10,25,100)) +
+   geom_point(position=position_jitter(w=0.1,h=0)) +
+   ggtitle(res3_ordered[res3_ordered$ensembl==gene,2]) +
+   theme(legend.position = "none", axis.text.x = element_blank(), axis.title.x = element_blank())
+   # Definir as cores para cada grupo
+   d1 <- d1 + scale_color_manual(values = colors)
+   plot_list[[gene]] <- d1
+}
+
+combined_plot <- cowplot::plot_grid(plotlist = plot_list, nrow = 1)
+
+legend <- get_legend(ggplot(data.frame(groups = unique(d$groups)), aes(x = 1, y = groups, color = groups)) +
+  geom_point(show.legend = TRUE) +
+  scale_color_manual(values = colors) +
+  theme(legend.position = "left"))
+
+combined_plot <- cowplot::plot_grid(combined_plot, legend, ncol = 2, rel_widths = c(4, 1))
+combined_plot
+
+ggsave("./Resultados_subDP/age_sex_batch/BoxPlot_DEG_DPd_DPsd_3gps.png", plot = combined_plot, 
+       width = 8, height = 6, dpi = 600)
+```
+
+### Heatmap dos DEG (Geral)
+
+```{r Heatmap Geral, fig.align='center', fig.height = 4, fig.width = 7, colapse=TRUE, echo=TRUE, include=TRUE}
+# HEATMAP - DEG Geral ##########################
+DEG <- c(DEG_CTvsDPsd_mas.fem, DEG_CTvsDPd_mas.fem, DEG_DPdvsDPsd_mas.fem)
+length(DEG)
+
+ddsHTSeq <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable,
+                                       directory = directory,
+                                       design = ~ groups + sex + SeqBatch + age)
+keep <- rowSums(counts(ddsHTSeq) >= 5) >= 5
+dds <- ddsHTSeq[keep,]
+dds
+
+dds <- estimateSizeFactors(dds)
+dds <- estimateDispersions(dds)
+ntd <- normTransform(dds)
+select <- order(rowMeans(counts(dds,normalized=T)),
+                decreasing=T)[rownames(dds)%in%DEG]
+df <- as.data.frame(colData(dds)[,c("condition","groups")]) %>% dplyr::select(groups)
+
+my_colors <- c("control" = "indianred1", "DP_dyskinesia" = "springgreen3", "DP_no_dyskinesia" = "steelblue2")
+
+heatmap <- pheatmap(assay(ntd)[select,],
+         main = "Heatmap - DEG",
+         method = "median",
+         annotation_col = df,
+         scale = "column",
+         cluster_rows=F,
+         show_rownames=T,
+         show_colnames = F,
+         cluster_cols=F,
+         annotation_colors = list(groups = my_colors),
+         fontsize_row = 6)
+heatmap
+ggsave("./Resultados_subDP/age_sex_batch/Heatmap_Geral.png", plot = heatmap, 
+       width = 10, height = 8, dpi = 600)
+
+
+```
+
+# Vias exclusivas - DP-D e DP-ND
+
+```{r}
+
+# Exclusive GSEA Pathways - DP-D and DP-ND
+# PD-D
+react2_df <- react2_df[order(react2_df$enrichmentScore, decreasing = T),]
+head(react2_df)
+
+# PD-ND
+react3_df <- react3_df[order(react3_df$enrichmentScore, decreasing = T),]
+head(react3_df)
+
+# Intersect between enriched pathways in PD-D and PD-ND
+comuns <- intersect(react2_df$ID, react3_df$ID) # 1 via comum -> receptores scavengers
+
+# Exclusive in DP-D
+vias_exclusivas_DPd <- setdiff(react2_df$ID, comuns)
+vias_exclusivas_DPd <- react2_df %>% filter(ID %in% vias_exclusivas_DPd)
+
+# Exclusive in DP-ND
+vias_exclusivas_DPnd <- setdiff(react3_df$ID, comuns)
+vias_exclusivas_DPnd <- react3_df %>% filter(ID %in% vias_exclusivas_DPnd)
+
+```
+
+#### BOXPLOT - ALGUNS GENES DA COEXPRESSÃO E COEXPRESSÃO DIFERENCIAL
+
+```{r Boxplot_Coexp e DifCoexp, fig.align='center', fig.height = 15, fig.width = 20, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# Genes do resultado do deseq
+resultado <- as.data.frame(results(dds))
+resultado$gene <- rownames(resultado)
+gene_list <- rownames(resultado)
+
+##########################################
+###### Somente os genes da DIFCOEXP - DP-D
+
+# Genes selecionados para o boxplot
+gene_selected <- c("ENSG00000213085", "ENSG00000143776", "ENSG00000183137", "ENSG00000004897", "ENSG00000156787","ENSG00000138160", "ENSG00000043093", "ENSG00000196544", "ENSG00000154813", "ENSG00000212664","ENSG00000116668", "ENSG00000176208", "ENSG00000169621", "ENSG00000185480",
+                   "ENSG00000276573","ENSG00000279759", "ENSG00000279082", "ENSG00000261416", "ENSG00000136869",
+                   "ENSG00000120725","ENSG00000112742", "ENSG00000152078", "ENSG00000233431", "ENSG00000023330",
+                   "ENSG00000239039","ENSG00000254995", "ENSG00000177888", "ENSG00000122873", "ENSG00000275004")
+# Filtrando o resultado do deseq para os genes selecionados do boxplot
+gene_list <- gene_list[gene_list %in% gene_selected]
+
+plot_list <- list()
+
+for (gene in gene_list[1:29]) {
+  d <- plotCounts(dds, gene= gene, intgroup="groups", returnData=TRUE)
+  # Gráfico individual
+  d1 <- ggplot(d, aes(x=groups, y=count, color = groups)) + 
+    geom_boxplot(trim = F) + 
+    scale_y_log10(breaks=c(0,10,50,100)) +
+    geom_point(position=position_jitter(w=0.1,h=0)) +
+    ggtitle(resultado[resultado$gene==gene,7]) +
+    theme(legend.position = "none", axis.text.x = element_blank(), axis.title.x = element_blank(),
+          axis.text = element_text(size = 5), plot.title = element_text(size = 10))
+  
+  plot_list[[gene]] <- d1
+}
+
+# Combina todos os gráficos usando cowplot::plot_grid()
+combined_plot <- cowplot::plot_grid(plotlist = plot_list, nrow = 4, ncol = 8)
+
+# Criar uma legenda de cores separada
+legend <- get_legend(ggplot(data.frame(groups = unique(d$groups)), aes(x = 1, y = groups, color = groups)) +
+                       geom_point(show.legend = TRUE) +
+                       theme(legend.position = "bottom"))
+# Adicionar apenas uma legenda de cores
+combined_plot <- cowplot::plot_grid(combined_plot, legend, ncol = 1, nrow = 2, rel_heights = c(7, 1))
+combined_plot
+ggsave("./BoxPlot_SelecGenes_Difcoexp.png", plot = combined_plot, 
+       width = 20, height = 16, dpi = 600)
+
+
+##########################################
+###### Somente os genes da COEXP - DP-D
+
+# Genes selecionados para o boxplot
+gene_selected <- c("ENSG00000144635","ENSG00000168172", "ENSG00000101162", "ENSG00000109458", "ENSG00000185950","ENSG00000114166", "ENSG00000116741", "ENSG00000121966", "ENSG00000076641", "ENSG00000051382","ENSG00000170348", "ENSG00000265808", "ENSG00000116824", "ENSG00000198087")
+# Filtrando o resultado do deseq para os genes selecionados do boxplot
+gene_list <- gene_list[gene_list %in% gene_selected]
+
+plot_list <- list()
+
+for (gene in gene_list[1:14]) {
+  d <- plotCounts(dds, gene= gene, intgroup="groups", returnData=TRUE)
+  # Gráfico individual
+  d1 <- ggplot(d, aes(x=groups, y=count, color = groups)) + 
+    geom_boxplot(trim = F) + 
+    scale_y_log10(breaks=c(0,10,50,100)) +
+    geom_point(position=position_jitter(w=0.1,h=0)) +
+    ggtitle(resultado[resultado$gene==gene,7]) +
+    theme(legend.position = "none", axis.text.x = element_blank(), axis.title.x = element_blank(),
+          axis.text = element_text(size = 5), plot.title = element_text(size = 10))
+  
+  plot_list[[gene]] <- d1
+}
+
+# Combina todos os gráficos usando cowplot::plot_grid()
+combined_plot <- cowplot::plot_grid(plotlist = plot_list, nrow = 2)
+
+# Criar uma legenda de cores separada
+legend <- get_legend(ggplot(data.frame(groups = unique(d$groups)), aes(x = 1, y = groups, color = groups)) +
+                       geom_point(show.legend = TRUE) +
+                       theme(legend.position = "bottom"))
+# Adicionar apenas uma legenda de cores
+combined_plot <- cowplot::plot_grid(combined_plot, legend, ncol = 1, nrow = 2, rel_heights = c(7, 1))
+combined_plot
+ggsave("./BoxPlot_SelecGenes_coexp.png", plot = combined_plot, 
+       width = 20, height = 16, dpi = 600)
+
+```
+
+### CURVA ROC - 4 GENES (HBA2, HBBP1, RNA5SP429, ENSG00000281383)
+
+```{r Curva ROC, fig.align='center', fig.height = 15, fig.width = 20, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# Lista de genes
+genes <- c("ENSG00000188536","ENSG00000200558", "ENSG00000229988", "ENSG00000281383")
+
+# Tabela de counts - selecionando os genes de interesse
+table_counts <- counts_DP_filtered[counts_DP_filtered$Gene_ID %in% genes, ]
+table_counts <- t(table_counts) %>% as.data.frame()
+table_counts <- table_counts[-1,]
+table_counts$sample <- rownames(table_counts)
+
+# Tabela de dados
+metadata <- metadata_parkinson[,1:2]
+metadata$groups <- gsub("DP_dyskinesia","DP",metadata$groups)
+metadata$groups <- gsub("DP_no_dyskinesia","DP",metadata$groups)
+colnames(metadata) <- c("sample","groups")
+
+# Unindo as tabelas por 
+table <- cbind(metadata, table_counts)
+table <- table[,-7]
+table$ENSG00000188536 <- as.numeric(table$ENSG00000188536)
+table$ENSG00000200558 <- as.numeric(table$ENSG00000200558)
+table$ENSG00000229988 <- as.numeric(table$ENSG00000229988)
+table$ENSG00000281383 <- as.numeric(table$ENSG00000281383)
+
+# CURVA ROC
+library(pROC)
+
+# FORMA 1 - Para todos os genes
+rocobj1 <- roc(table$groups, table$ENSG00000188536)
+rocobj2 <- roc(table$groups, table$ENSG00000281383)
+rocobj3 <- roc(table$groups, table$ENSG00000229988)
+#rocobj4 <- roc(table$groups, table$ENSG00000200558)
+
+plot(rocobj1, main="ROC curve of selected genes", col="#1c61b6")
+lines(rocobj2, col="#840008")
+lines(rocobj3, col="#008600")
+#lines(rocobj4, col="orange")
+
+#legend("bottomright", legend=c("HBA2", "ENSG00000281383","HBBP1", "RNA5SP429"), col=c("#1c61b6","#840000","#008600","orange"), lwd=2.5, cex=0.4, box.lwd=1, x.intersp=0.5)
+
+# Adiciona os valores de AUC em porcentagem
+text(0.3, 0.35, "AUC", col = "black", cex=0.8, font=2)
+text(0.3, 0.30, paste("HBA2 =", round(auc(rocobj1) * 100, 2), "%"), col = "#1c61b6", cex=0.9, font=2)
+text(0.3, 0.25, paste("ENSG00000281383 =", round(auc(rocobj2) * 100, 2), "%"), col = "#840008", cex=0.9, font=2)
+text(0.3, 0.20, paste("HBBP1 =", round(auc(rocobj3) * 100, 2), "%"), col = "#008600", cex=0.9, font=2)
+#text(0.3, 0.15, paste("RNA5SP429 =", round(auc(rocobj4) * 100, 2), "%"), col = "orange", cex=0.8, font=2)
+
+```
+
+```{r Curva ROC1, fig.align='center', fig.height = 15, fig.width = 20, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# FORMA 2 - mostrando o intervalo de confiança
+# HBA2
+rocobj <- plot.roc(table$groups, table$ENSG00000188536,
+                   main = "HBA2", 
+                   percent=TRUE,
+                   ci = TRUE,                  # compute AUC (of AUC by default)
+                   print.auc = TRUE)           # print the AUC (will contain the CI)
+ciobj <- ci.se(rocobj,                         # CI of sensitivity
+               specificities = seq(0, 100, 5)) # over a select set of specificities
+plot(ciobj, type = "shape", col = "#1c61b6AA")     # plot as a blue shape
+plot(ci(rocobj, of = "thresholds", thresholds = "best")) # add one threshold
+
+# ENSG00000281383
+rocobj <- plot.roc(table$groups, table$ENSG00000281383,
+                   main = "ENSG00000281383", 
+                   percent=TRUE,
+                   ci = TRUE,                  # compute AUC (of AUC by default)
+                   print.auc = TRUE)           # print the AUC (will contain the CI)
+ciobj <- ci.se(rocobj,                         # CI of sensitivity
+               specificities = seq(0, 100, 5)) # over a select set of specificities
+plot(ciobj, type = "shape", col = "#840000")     # plot as a blue shape
+plot(ci(rocobj, of = "thresholds", thresholds = "best")) # add one threshold
+
+# HBBP1
+rocobj <- plot.roc(table$groups, table$ENSG00000229988,
+                   main = "HBBP1", 
+                   percent=TRUE,
+                   ci = TRUE,                  # compute AUC (of AUC by default)
+                   print.auc = TRUE)           # print the AUC (will contain the CI)
+ciobj <- ci.se(rocobj,                         # CI of sensitivity
+               specificities = seq(0, 100, 5)) # over a select set of specificities
+plot(ciobj, type = "shape", col = "#008600")     # plot as a blue shape
+plot(ci(rocobj, of = "thresholds", thresholds = "best")) # add one threshold
+
+# RNA5SP429
+rocobj <- plot.roc(table$groups, table$ENSG00000200558,
+                   main = "RNA5SP429", 
+                   percent=TRUE,
+                   ci = TRUE,                  # compute AUC (of AUC by default)
+                   print.auc = TRUE)           # print the AUC (will contain the CI)
+ciobj <- ci.se(rocobj,                         # CI of sensitivity
+               specificities = seq(0, 100, 5)) # over a select set of specificities
+plot(ciobj, type = "shape", col = "orange")     # plot as a blue shape
+plot(ci(rocobj, of = "thresholds", thresholds = "best")) # add one threshold
+
+```
+
+```{r Curva ROC2, fig.align='center', fig.height = 15, fig.width = 20, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# FORMA 3
+
+plot.roc(table$groups, table$ENSG00000188536,          # data
+         percent = TRUE,                    # show all values in percent
+         partial.auc=c(100, 90), 
+         partial.auc.correct=TRUE,          # define a partial AUC (pAUC)
+         print.auc=TRUE,                    
+         #display pAUC value on the plot with following options:
+         print.auc.pattern = "Corrected pAUC (100-90%% SP):\n%.1f%%",
+         print.auc.col = "#1c61b6",
+         auc.polygon = TRUE, 
+         auc.polygon.col = "#1c61b6",       # show pAUC as a polygon
+         max.auc.polygon = TRUE, 
+         max.auc.polygon.col = "#1c61b622", # also show the 100% polygon
+         main = "Partial AUC (pAUC) - HBA2")
+plot.roc(table$groups, table$ENSG00000188536,
+         percent = TRUE, 
+         add = TRUE, 
+         type = "n",                        # add to plot, but don't re-add the ROC itself (useless)
+         partial.auc = c(100, 90), 
+         partial.auc.correct = TRUE,
+         partial.auc.focus = "se",          # focus pAUC on the sensitivity
+         print.auc = TRUE, 
+         print.auc.pattern = "Corrected pAUC (100-90%% SE):\n%.1f%%", 
+         print.auc.col = "#008600",
+         print.auc.y = 40,                  # do not print auc over the previous one
+         auc.polygon = TRUE, 
+         auc.polygon.col = "#008600",
+         max.auc.polygon = TRUE, 
+         max.auc.polygon.col = "#00860022")
+```
+
+### GENES EXCLUSIVOS D.E. EM PD-D e PD-ND (Comparando com o DP-TOTAL)
+
+```{r Curva ROC, fig.align='center', fig.height = 15, fig.width = 20, colapse=TRUE, echo=TRUE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+DPgeral <- read.csv("./Resultados_DPtotal/age_sex_batch/DEG_DP.CT_Geral[24 DEG].csv")
+genes_geral <- DPgeral$ensembl
+DP_D <- read.csv("./Resultados_subDP/age_sex_batch/DEG_GERAL_DYS.CT_sexo_batch_age[14 DEG].csv")
+genes_DP_D <- DP_D$ensembl
+DP_ND <- read.csv("./Resultados_subDP/age_sex_batch/DEG_GERAL_noDYS.CT_sexo_batch_age[16 DEG].csv")
+genes_DP_ND <- DP_ND$ensembl
+
+listInput <- list("D.E.G. DP"= genes_geral,
+                  "D.E.G. DP-D"= genes_DP_D,
+                  "D.E.G. DP-ND"= genes_DP_ND
+                  )
+up <- upset(fromList(listInput), order.by = "freq", matrix.color = "dodgerblue1", 
+            nsets = 3, 
+            point.size = 4,
+            line.size = 1.5,
+            sets.x.label = "Number of Dif. Expressed Genes",
+            text.scale = c(1.5, 3, 1.5, 1.5, 3, 3))
+up
+
+# Genes exclusivos DP-D (6)
+exclusive_DPd <- setdiff(DP_D$ensembl, DP_ND$ensembl)
+exclusive_DPd <- setdiff(exclusive_DPd, DPgeral$ensembl)
+length(exclusive_DPd)
+DP_D_exclusivos <- DP_D[DP_D$ensembl %in% exclusive_DPd,]
+#write.csv(DP_D_exclusivos, "./Resultados_subDP/age_sex_batch/DEG DP_D exclusivos.csv")
+
+# Genes exclusivos DP-ND (5)
+exclusive_DPnd <- setdiff(DP_ND$ensembl, DP_D$ensembl)
+exclusive_DPnd <- setdiff(exclusive_DPnd, DPgeral$ensembl)
+length(exclusive_DPnd)
+DP_ND_exclusivos <- DP_ND[DP_ND$ensembl %in% exclusive_DPnd,]
+#write.csv(DP_ND_exclusivos, "./Resultados_subDP/age_sex_batch/DEG DP_ND exclusivos.csv")
+
+
+```
+
+end
+
+

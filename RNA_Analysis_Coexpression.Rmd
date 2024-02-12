@@ -1,0 +1,710 @@
+---
+title: "Coexpressao_dp"
+output:
+  html_document: default
+  pdf_document: default
+date: "2023-07-21"
+editor_options:
+  chunk_output_type: console
+---
+
+# Pacotes
+
+```{r Pacotes, include=FALSE}
+library(CEMiTool)
+library(diffcoexp)
+library(biomaRt)
+library(org.Hs.eg.db)
+library(reactome.db)
+library(dplyr)
+```
+
+# Dados
+
+```{r Dados, echo=TRUE, include=TRUE, collapse=TRUE}
+setwd("/Users/tatiane/Library/CloudStorage/OneDrive-UniversidadeFederaldoPará-UFPA/DOUTORADO/2.RESULTADOS_TRANSCRIPTOMA/Parkinson_Tati/Coexpressao_DifCoexp_dp/")
+
+
+########### NORMALIZAÇÃO ##############
+# Normalizando a Matriz por Library Size Factors
+#dge <- DGEList(counts = matriz)
+#lib_size_factors <- calcNormFactors(dge, method = "TMM")
+#normalizada_matriz <- cpm(dge, lib.size = lib_size_factors)
+
+load("./Matrizes_Counts_Normalizadas.RData")
+
+control <- as.data.frame(control)
+
+matriz_counts_geral <- cbind(case, control)
+
+# Visualizando o começo de cada uma
+head(case_D)
+
+head(case_ND)
+
+head(control)
+
+head(matriz_counts_geral)
+
+### Salvando os dados normalizados [dataframe]
+write.table(case,"./Matriz_Normalizada_DPgeral.txt", quote = F)
+write.table(case_D,"./Matriz_Normalizada_DP-D.txt", quote = F)
+write.table(case_ND,"./Matriz_Normalizada_DP-ND.txt", quote = F)
+write.table(control,"./Matriz_Normalizada_Controle.txt", quote = F)
+
+
+
+```
+
+# ANÁLISE DAS REDES DO GRUPO CASO - DISCINESIA
+
+```{r Análise Caso-Com-Discinesia, echo=TRUE, include=TRUE, collapse=TRUE}
+## Perform first analysis
+cem <- cemitool(case_D, apply_vst = TRUE, verbose = TRUE, force_beta = T)
+
+# Save files to get selected genes
+write_files(cem, directory="./Resultados_Coexpressão/Cemitool_Caso_Discinesia/Tables")
+
+# Load selected genes
+DP_genes <- read.delim2("./Resultados_Coexpressão/Cemitool_Caso_Discinesia/Tables/selected_genes.txt", header = F,sep = "\t", stringsAsFactors = F)
+
+genes <- DP_genes$V1
+
+# Função para mapear os simbolos e entrez
+# Checando os tipos aceitos nos argumentos:
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+# Simbolos
+map_ensembl_to_symbol <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "SYMBOL")
+return(gene_symbols)
+}
+# entrez
+map_ensembl_to_entrez <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "ENTREZID")
+return(gene_symbols)
+}
+# Peptide
+map_ensembl_to_peptide <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "ENSEMBLPROT")
+return(gene_symbols)
+}
+
+ids <- as.data.frame(map_ensembl_to_symbol(genes))
+ids$entrezgene_id <- map_ensembl_to_entrez(genes)
+ids$ensembl_peptide_id <- map_ensembl_to_peptide(genes)
+ids$ensembl_gene_id <- rownames(ids)
+colnames(ids) <- c("hgnc_symbol","entrezgene_id","ensembl_peptide_id","ensembl_gene_id")
+
+# Remove missing info from symbol
+ids$hgnc_symbol <- ifelse(ids$hgnc_symbol == "", NA, ids$hgnc_symbol)
+hgnc_genes <- unique(ids$hgnc_symbol)
+
+## Get pathways (Reactome)
+# Get REACTOME / Entrez ID dictionary
+React_to_entrez <- as.data.frame(reactomeEXTID2PATHID)
+ReactNames <- as.data.frame(reactomePATHID2NAME)
+ReactNames_to_entrez <- merge(React_to_entrez, ReactNames,
+                               by = "DB_ID")
+
+# Get REACTOME / symbol dictionary
+ids$entrezgene_id <- as.character(ids$entrezgene_id)
+React_to_symbol <- merge(ids, ReactNames_to_entrez, by.x = "entrezgene_id",
+                         by.y = "gene_id")
+React_to_symbol <- unique(React_to_symbol)
+
+# Remove species ID from REACTOME Pathway name
+React_to_symbol$path_name <- substring(React_to_symbol$path_name, 14, 1000)
+
+## Get REACTOME pathways list
+paths <- unique(React_to_symbol[, c("path_name", "hgnc_symbol", "ensembl_gene_id")])
+paths <- setNames(paths, c("term", "gene"))
+
+## Get Protein-protein interactions
+
+# Concatenate gene symbols to request from symbol
+genes_hgnc_concatenated <- paste0(hgnc_genes, collapse = "%0d")
+
+# Use STRING API to map IDs
+req <- RCurl::postForm(
+  "https://string-db.org/api/tsv/get_string_ids",
+  identifiers = genes_hgnc_concatenated,
+  echo_query = "1",
+  species = "9606") # H. sapiens
+
+# Create maped IDs table
+map_ids <- read.table(text = req, sep = "\t", header = T, quote = "")
+
+# Load STRING function to combine scores
+combinescores <- function(dat, evidences = "all", confLevel = 0.4) {
+  if(evidences[1] == "all"){
+    edat <- dat[, - c(1, 2, ncol(dat))]
+  } else {
+    if(!all(evidences %in% colnames(dat))){
+      stop("NOTE: one or more 'evidences' not listed in 'dat' colnames!")
+    }
+    edat <- dat[, evidences]
+  }
+  if (any(edat > 1)){
+    edat <- edat/1000
+  }
+  edat <- 1 - edat
+  sc <- apply(X = edat, MARGIN = 1, FUN = function(x) 1 - prod(x))
+  dat <- cbind(dat[,c(1, 2)], combined_score = sc)
+  idx <- dat$combined_score >= confLevel
+  dat <- dat[idx,]
+  return(dat)
+}
+
+# Concatenate STRING IDs to request
+# Precisei dividir as corridas por haver um limite de requisição
+### Req2
+### map_ids = 1382 genes
+genes_string_concatenated <- paste0(unique(map_ids$stringId),
+                                    collapse = "%0d")
+# Use STRING API to get network
+req1 <- RCurl::postForm(
+  "https://string-db.org/api/tsv/network",
+  identifiers = genes_string_concatenated,
+  required_score = "0", # Min score by interaction
+  species     = "9606") # H. sapiens
+
+# Create and modify interaction network table
+int_network1 <- read.table(text = req1, sep = "\t", header = T)
+int_network1 <- unique(int_network1)
+int_network <- combinescores(int_network1,
+                             evidences = c("ascore", "escore", "dscore"),
+                             confLevel = 0.55)
+
+# Remove species ID from ENSP
+int_network$stringId_A <- substring(int_network$stringId_A, 6, 1000)
+int_network$stringId_B <- substring(int_network$stringId_B, 6, 1000)
+
+# Filter network by ENSPs in dataframe
+idx1 <- int_network$stringId_A %in% ids$ensembl_peptide_id
+idx2 <- int_network$stringId_B %in% ids$ensembl_peptide_id
+int_network <- int_network[idx1 & idx2,]
+
+# Keep gene symbol AND ensembl in interaction table
+int_network$SYMBOL_A <- ids$hgnc_symbol[match(int_network$stringId_A,
+                                              ids$ensembl_peptide_id)]
+int_network$SYMBOL_B <- ids$hgnc_symbol[match(int_network$stringId_B,
+                                              ids$ensembl_peptide_id)]
+int_network$ENSG_A <- ids$ensembl_gene_id[match(int_network$stringId_A,
+                                              ids$ensembl_peptide_id)]
+int_network$ENSG_B <- ids$ensembl_gene_id[match(int_network$stringId_B,
+                                              ids$ensembl_peptide_id)]
+
+############
+# usar umas das opções apenas para correr o cemitool
+int_network_symbol <- int_network[, c("SYMBOL_A", "SYMBOL_B")]
+
+int_network_ensg <- int_network[, c("ENSG_A", "ENSG_B")]
+
+# PATHs
+head(paths)
+paths_nv <- unique(React_to_symbol[, c("path_name", "ensembl_gene_id")])
+colnames(paths_nv) <- c("term", "gene")
+
+############
+
+## Perform full analysis
+cem <- cemitool(case_D, gmt = paths_nv, interactions= int_network_ensg,
+                apply_vst = TRUE, verbose = TRUE, force_beta = T)
+
+# write files 
+generate_report(cem, directory="./Resultados_Coexpressão/Cemitool_Caso_Discinesia/Report", force = TRUE)
+write_files(cem, directory="./Resultados_Coexpressão/Cemitool_Caso_Discinesia/Tables", force = TRUE)
+save_plots(cem, "all", directory="./Resultados_Coexpressão/Cemitool_Caso_Discinesia/Plots", force = TRUE)
+
+```
+
+# ANALISE DAS REDES DO GRUPO CASO - SEM DISCINESIA
+
+```{r Análise Caso-Sem-Discinesia, echo=TRUE, include=TRUE, collapse=TRUE}
+## Perform first analysis
+cem <- cemitool(case_ND, apply_vst = TRUE, verbose = TRUE, force_beta = T)
+
+# Save files to get selected genes
+write_files(cem, directory="./Resultados_Coexpressão/Cemitool_Caso_Sem_Discinesia/Tables")
+
+# Load selected genes
+DP_genes <- read.delim2("./Resultados_Coexpressão/Cemitool_Caso_Sem_Discinesia/Tables/selected_genes.txt", header = F,sep = "\t", stringsAsFactors = F)
+
+genes <- DP_genes$V1
+
+# Função para mapear os simbolos e entrez
+# Checando os tipos aceitos nos argumentos:
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+# Simbolos
+map_ensembl_to_symbol <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "SYMBOL")
+return(gene_symbols)
+}
+# entrez
+map_ensembl_to_entrez <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "ENTREZID")
+return(gene_symbols)
+}
+# Peptide
+map_ensembl_to_peptide <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "ENSEMBLPROT")
+return(gene_symbols)
+}
+
+ids <- as.data.frame(map_ensembl_to_symbol(genes))
+ids$entrezgene_id <- map_ensembl_to_entrez(genes)
+ids$ensembl_peptide_id <- map_ensembl_to_peptide(genes)
+ids$ensembl_gene_id <- rownames(ids)
+colnames(ids) <- c("hgnc_symbol","entrezgene_id","ensembl_peptide_id","ensembl_gene_id")
+ids <- ids[-1,]
+
+# Remove missing info from symbol
+ids$hgnc_symbol <- ifelse(ids$hgnc_symbol == "", NA, ids$hgnc_symbol)
+hgnc_genes <- unique(ids$hgnc_symbol)
+
+## Get pathways (Reactome)
+# Get REACTOME / Entrez ID dictionary
+React_to_entrez <- as.data.frame(reactomeEXTID2PATHID)
+ReactNames <- as.data.frame(reactomePATHID2NAME)
+ReactNames_to_entrez <- merge(React_to_entrez, ReactNames,
+                               by = "DB_ID")
+
+# Get REACTOME / symbol dictionary
+ids$entrezgene_id <- as.character(ids$entrezgene_id)
+React_to_symbol <- merge(ids, ReactNames_to_entrez, by.x = "entrezgene_id",
+                         by.y = "gene_id")
+React_to_symbol <- unique(React_to_symbol)
+
+# Remove species ID from REACTOME Pathway name
+React_to_symbol$path_name <- substring(React_to_symbol$path_name, 14, 1000)
+colnames(React_to_symbol)[4] <- "ensembl_gene_id"
+## Get REACTOME pathways list
+paths <- unique(React_to_symbol[, c("path_name", "hgnc_symbol", "ensembl_gene_id")])
+paths <- setNames(paths, c("term", "gene"))
+
+## Get Protein-protein interactions
+
+# Concatenate gene symbols to request from symbol
+genes_hgnc_concatenated <- paste0(hgnc_genes, collapse = "%0d")
+
+# Use STRING API to map IDs
+req <- RCurl::postForm(
+  "https://string-db.org/api/tsv/get_string_ids",
+  identifiers = genes_hgnc_concatenated,
+  echo_query = "1",
+  species = "9606") # H. sapiens
+
+# Create maped IDs table
+map_ids <- read.table(text = req, sep = "\t", header = T, quote = "")
+
+# Load STRING function to combine scores
+combinescores <- function(dat, evidences = "all", confLevel = 0.4) {
+  if(evidences[1] == "all"){
+    edat <- dat[, - c(1, 2, ncol(dat))]
+  } else {
+    if(!all(evidences %in% colnames(dat))){
+      stop("NOTE: one or more 'evidences' not listed in 'dat' colnames!")
+    }
+    edat <- dat[, evidences]
+  }
+  if (any(edat > 1)){
+    edat <- edat/1000
+  }
+  edat <- 1 - edat
+  sc <- apply(X = edat, MARGIN = 1, FUN = function(x) 1 - prod(x))
+  dat <- cbind(dat[,c(1, 2)], combined_score = sc)
+  idx <- dat$combined_score >= confLevel
+  dat <- dat[idx,]
+  return(dat)
+}
+
+# Concatenate STRING IDs to request
+# Precisei dividir as corridas por haver um limite de requisição
+### Req2
+### map_ids = 1527 genes
+genes_string_concatenated <- paste0(unique(map_ids$stringId),
+                                    collapse = "%0d")
+# Use STRING API to get network
+req1 <- RCurl::postForm(
+  "https://string-db.org/api/tsv/network",
+  identifiers = genes_string_concatenated,
+  required_score = "0", # Min score by interaction
+  species     = "9606") # H. sapiens
+
+# Create and modify interaction network table
+int_network1 <- read.table(text = req1, sep = "\t", header = T)
+int_network1 <- unique(int_network1)
+int_network <- combinescores(int_network1,
+                             evidences = c("ascore", "escore", "dscore"),
+                             confLevel = 0.55)
+
+# Remove species ID from ENSP
+int_network$stringId_A <- substring(int_network$stringId_A, 6, 1000)
+int_network$stringId_B <- substring(int_network$stringId_B, 6, 1000)
+
+# Filter network by ENSPs in dataframe
+idx1 <- int_network$stringId_A %in% ids$ensembl_peptide_id
+idx2 <- int_network$stringId_B %in% ids$ensembl_peptide_id
+int_network <- int_network[idx1 & idx2,]
+
+# Keep gene symbol AND ensembl in interaction table
+int_network$SYMBOL_A <- ids$hgnc_symbol[match(int_network$stringId_A,
+                                              ids$ensembl_peptide_id)]
+int_network$SYMBOL_B <- ids$hgnc_symbol[match(int_network$stringId_B,
+                                              ids$ensembl_peptide_id)]
+int_network$ENSG_A <- ids$ensembl_gene_id[match(int_network$stringId_A,
+                                              ids$ensembl_peptide_id)]
+int_network$ENSG_B <- ids$ensembl_gene_id[match(int_network$stringId_B,
+                                              ids$ensembl_peptide_id)]
+
+############
+# usar umas das opções apenas para correr o cemitool
+int_network_symbol <- int_network[, c("SYMBOL_A", "SYMBOL_B")]
+
+int_network_ensg <- int_network[, c("ENSG_A", "ENSG_B")]
+
+# PATHs
+head(paths)
+paths_nv <- unique(React_to_symbol[, c("path_name", "ensembl_gene_id")])
+colnames(paths_nv) <- c("term", "gene")
+
+############
+
+## Perform full analysis
+cem <- cemitool(case_ND, gmt = paths_nv, interactions= int_network_ensg,
+                apply_vst = TRUE, verbose = TRUE, force_beta = T)
+
+# write files 
+generate_report(cem, directory="./Resultados_Coexpressão/Cemitool_Caso_Sem_Discinesia/Report", force = TRUE)
+write_files(cem, directory="./Resultados_Coexpressão/Cemitool_Caso_Sem_Discinesia/Tables", force = TRUE)
+save_plots(cem, "all", directory="./Resultados_Coexpressão/Cemitool_Caso_Sem_Discinesia/Plots", force = TRUE)
+
+```
+
+# ANALISE DAS REDES DO GRUPO CONTROLE
+
+```{r Análise Controle, echo=TRUE, include=TRUE, collapse=TRUE}
+## Perform first analysis
+cem <- cemitool(control, apply_vst = TRUE, verbose = TRUE, force_beta = T)
+
+# Save files to get selected genes
+write_files(cem, directory="./Resultados_Coexpressão/Cemitool_Controle/Tables")
+
+# Load selected genes
+DP_genes <- read.delim2("./Resultados_Coexpressão/Cemitool_Controle/Tables/selected_genes.txt", header = F,sep = "\t", stringsAsFactors = F)
+
+genes <- DP_genes$V1
+
+# Função para mapear os simbolos e entrez
+# Checando os tipos aceitos nos argumentos:
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+# Simbolos
+map_ensembl_to_symbol <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "SYMBOL")
+return(gene_symbols)
+}
+# entrez
+map_ensembl_to_entrez <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "ENTREZID")
+return(gene_symbols)
+}
+# Peptide
+map_ensembl_to_peptide <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "ENSEMBLPROT")
+return(gene_symbols)
+}
+
+ids <- as.data.frame(map_ensembl_to_symbol(genes))
+ids$entrezgene_id <- map_ensembl_to_entrez(genes)
+ids$ensembl_peptide_id <- map_ensembl_to_peptide(genes)
+ids$ensembl_gene_id <- rownames(ids)
+colnames(ids) <- c("hgnc_symbol","entrezgene_id","ensembl_peptide_id","ensembl_gene_id")
+ids <- ids[c(-1,-3),]
+
+# Remove missing info from symbol
+ids$hgnc_symbol <- ifelse(ids$hgnc_symbol == "", NA, ids$hgnc_symbol)
+hgnc_genes <- unique(ids$hgnc_symbol)
+
+## Get pathways (Reactome)
+# Get REACTOME / Entrez ID dictionary
+React_to_entrez <- as.data.frame(reactomeEXTID2PATHID)
+ReactNames <- as.data.frame(reactomePATHID2NAME)
+ReactNames_to_entrez <- merge(React_to_entrez, ReactNames,
+                               by = "DB_ID")
+
+# Get REACTOME / symbol dictionary
+ids$entrezgene_id <- as.character(ids$entrezgene_id)
+React_to_symbol <- merge(ids, ReactNames_to_entrez, by.x = "entrezgene_id",
+                         by.y = "gene_id")
+React_to_symbol <- unique(React_to_symbol)
+
+# Remove species ID from REACTOME Pathway name
+React_to_symbol$path_name <- substring(React_to_symbol$path_name, 14, 1000)
+colnames(React_to_symbol)[4] <- "ensembl_gene_id"
+## Get REACTOME pathways list
+paths <- unique(React_to_symbol[, c("path_name", "hgnc_symbol", "ensembl_gene_id")])
+paths <- setNames(paths, c("term", "gene"))
+
+## Get Protein-protein interactions
+
+# Concatenate gene symbols to request from symbol
+genes_hgnc_concatenated <- paste0(hgnc_genes, collapse = "%0d")
+
+# Use STRING API to map IDs
+req <- RCurl::postForm(
+  "https://string-db.org/api/tsv/get_string_ids",
+  identifiers = genes_hgnc_concatenated,
+  echo_query = "1",
+  species = "9606") # H. sapiens
+
+# Create maped IDs table
+map_ids <- read.table(text = req, sep = "\t", header = T, quote = "")
+
+# Load STRING function to combine scores
+combinescores <- function(dat, evidences = "all", confLevel = 0.4) {
+  if(evidences[1] == "all"){
+    edat <- dat[, - c(1, 2, ncol(dat))]
+  } else {
+    if(!all(evidences %in% colnames(dat))){
+      stop("NOTE: one or more 'evidences' not listed in 'dat' colnames!")
+    }
+    edat <- dat[, evidences]
+  }
+  if (any(edat > 1)){
+    edat <- edat/1000
+  }
+  edat <- 1 - edat
+  sc <- apply(X = edat, MARGIN = 1, FUN = function(x) 1 - prod(x))
+  dat <- cbind(dat[,c(1, 2)], combined_score = sc)
+  idx <- dat$combined_score >= confLevel
+  dat <- dat[idx,]
+  return(dat)
+}
+
+# Concatenate STRING IDs to request
+# Precisei dividir as corridas por haver um limite de requisição
+### Req1
+### map_ids = 1569 genes
+genes_string_concatenated <- paste0(unique(map_ids$stringId),
+                                    collapse = "%0d")
+# Use STRING API to get network
+req1 <- RCurl::postForm(
+  "https://string-db.org/api/tsv/network",
+  identifiers = genes_string_concatenated,
+  required_score = "0", # Min score by interaction
+  species     = "9606") # H. sapiens
+
+# Create and modify interaction network table
+int_network1 <- read.table(text = req1, sep = "\t", header = T)
+int_network1 <- unique(int_network1)
+int_network <- combinescores(int_network1,
+                             evidences = c("ascore", "escore", "dscore"),
+                             confLevel = 0.55)
+
+# Remove species ID from ENSP
+int_network$stringId_A <- substring(int_network$stringId_A, 6, 1000)
+int_network$stringId_B <- substring(int_network$stringId_B, 6, 1000)
+
+# Filter network by ENSPs in dataframe
+idx1 <- int_network$stringId_A %in% ids$ensembl_peptide_id
+idx2 <- int_network$stringId_B %in% ids$ensembl_peptide_id
+int_network <- int_network[idx1 & idx2,]
+
+# Keep gene symbol AND ensembl in interaction table
+int_network$SYMBOL_A <- ids$hgnc_symbol[match(int_network$stringId_A,
+                                              ids$ensembl_peptide_id)]
+int_network$SYMBOL_B <- ids$hgnc_symbol[match(int_network$stringId_B,
+                                              ids$ensembl_peptide_id)]
+int_network$ENSG_A <- ids$ensembl_gene_id[match(int_network$stringId_A,
+                                              ids$ensembl_peptide_id)]
+int_network$ENSG_B <- ids$ensembl_gene_id[match(int_network$stringId_B,
+                                              ids$ensembl_peptide_id)]
+
+############
+# usar umas das opções apenas para correr o cemitool
+int_network_symbol <- int_network[, c("SYMBOL_A", "SYMBOL_B")]
+
+int_network_ensg <- int_network[, c("ENSG_A", "ENSG_B")]
+
+# PATHs
+head(paths)
+paths_nv <- unique(React_to_symbol[, c("path_name", "ensembl_gene_id")])
+colnames(paths_nv) <- c("term", "gene")
+
+############
+
+## Perform full analysis
+cem <- cemitool(control, gmt = paths_nv, interactions= int_network_ensg,
+                apply_vst = TRUE, verbose = TRUE, force_beta = T)
+
+# write files 
+generate_report(cem, directory="./Resultados_Coexpressão/Cemitool_Controle/Report", force = TRUE)
+write_files(cem, directory="./Resultados_Coexpressão/Cemitool_Controle/Tables", force = TRUE)
+save_plots(cem, "all", directory="./Resultados_Coexpressão/Cemitool_Controle/Plots", force = TRUE)
+```
+
+# ANÁLISE DAS REDES - TODOS OS GRUPOS
+
+```{r Análise Caso, echo=TRUE, include=TRUE, collapse=TRUE}
+## Perform first analysis
+cem <- cemitool(matriz_counts_geral, apply_vst = TRUE, verbose = TRUE, force_beta = T)
+
+# Save files to get selected genes
+write_files(cem, directory="./Resultados_Coexpressão/Cemitool_Geral/Tables")
+
+# Load selected genes
+DP_genes <- read.delim2("./Resultados_Coexpressão/Cemitool_Geral/Tables/selected_genes.txt", header = F,sep = "\t", stringsAsFactors = F)
+
+genes <- DP_genes$V1
+
+# Função para mapear os simbolos e entrez
+# Checando os tipos aceitos nos argumentos:
+keytypes(org.Hs.eg.db)
+columns(org.Hs.eg.db)
+# Simbolos
+map_ensembl_to_symbol <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "SYMBOL")
+return(gene_symbols)
+}
+# entrez
+map_ensembl_to_entrez <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "ENTREZID")
+return(gene_symbols)
+}
+# Peptide
+map_ensembl_to_peptide <- function(ensembl_ids) {
+gene_symbols <- mapIds(org.Hs.eg.db, keys = ensembl_ids, keytype = "ENSEMBL", column = "ENSEMBLPROT")
+return(gene_symbols)
+}
+
+ids <- as.data.frame(map_ensembl_to_symbol(genes))
+ids$entrezgene_id <- map_ensembl_to_entrez(genes)
+ids$ensembl_peptide_id <- map_ensembl_to_peptide(genes)
+ids$ensembl_gene_id <- rownames(ids)
+colnames(ids) <- c("hgnc_symbol","entrezgene_id","ensembl_peptide_id","ensembl_gene_id")
+ids <- ids[c(-1,-2),]
+
+# Remove missing info from symbol
+ids$hgnc_symbol <- ifelse(ids$hgnc_symbol == "", NA, ids$hgnc_symbol)
+hgnc_genes <- unique(ids$hgnc_symbol)
+
+## Get pathways (Reactome)
+# Get REACTOME / Entrez ID dictionary
+React_to_entrez <- as.data.frame(reactomeEXTID2PATHID)
+ReactNames <- as.data.frame(reactomePATHID2NAME)
+ReactNames_to_entrez <- merge(React_to_entrez, ReactNames,
+                               by = "DB_ID")
+
+# Get REACTOME / symbol dictionary
+ids$entrezgene_id <- as.character(ids$entrezgene_id)
+React_to_symbol <- merge(ids, ReactNames_to_entrez, by.x = "entrezgene_id",
+                         by.y = "gene_id")
+React_to_symbol <- unique(React_to_symbol)
+
+# Remove species ID from REACTOME Pathway name
+React_to_symbol$path_name <- substring(React_to_symbol$path_name, 14, 1000)
+colnames(React_to_symbol)[4] <- "ensembl_gene_id"
+## Get REACTOME pathways list
+paths <- unique(React_to_symbol[, c("path_name", "hgnc_symbol", "ensembl_gene_id")])
+paths <- setNames(paths, c("term", "gene"))
+
+## Get Protein-protein interactions
+
+# Concatenate gene symbols to request from symbol
+genes_hgnc_concatenated <- paste0(hgnc_genes, collapse = "%0d")
+
+# Use STRING API to map IDs
+req <- RCurl::postForm(
+  "https://string-db.org/api/tsv/get_string_ids",
+  identifiers = genes_hgnc_concatenated,
+  echo_query = "1",
+  species = "9606") # H. sapiens
+
+# Create maped IDs table
+map_ids <- read.table(text = req, sep = "\t", header = T, quote = "")
+
+# Load STRING function to combine scores
+combinescores <- function(dat, evidences = "all", confLevel = 0.4) {
+  if(evidences[1] == "all"){
+    edat <- dat[, - c(1, 2, ncol(dat))]
+  } else {
+    if(!all(evidences %in% colnames(dat))){
+      stop("NOTE: one or more 'evidences' not listed in 'dat' colnames!")
+    }
+    edat <- dat[, evidences]
+  }
+  if (any(edat > 1)){
+    edat <- edat/1000
+  }
+  edat <- 1 - edat
+  sc <- apply(X = edat, MARGIN = 1, FUN = function(x) 1 - prod(x))
+  dat <- cbind(dat[,c(1, 2)], combined_score = sc)
+  idx <- dat$combined_score >= confLevel
+  dat <- dat[idx,]
+  return(dat)
+}
+
+# Concatenate STRING IDs to request
+# Precisei dividir as corridas por haver um limite de requisição
+### Req1
+### map_ids = 1524 genes
+genes_string_concatenated <- paste0(unique(map_ids$stringId),
+                                    collapse = "%0d")
+# Use STRING API to get network
+req1 <- RCurl::postForm(
+  "https://string-db.org/api/tsv/network",
+  identifiers = genes_string_concatenated,
+  required_score = "0", # Min score by interaction
+  species     = "9606") # H. sapiens
+
+# Create and modify interaction network table
+int_network1 <- read.table(text = req1, sep = "\t", header = T)
+int_network1 <- unique(int_network1)
+int_network <- combinescores(int_network1,
+                             evidences = c("ascore", "escore", "dscore"),
+                             confLevel = 0.55)
+
+# Remove species ID from ENSP
+int_network$stringId_A <- substring(int_network$stringId_A, 6, 1000)
+int_network$stringId_B <- substring(int_network$stringId_B, 6, 1000)
+
+# Filter network by ENSPs in dataframe
+idx1 <- int_network$stringId_A %in% ids$ensembl_peptide_id
+idx2 <- int_network$stringId_B %in% ids$ensembl_peptide_id
+int_network <- int_network[idx1 & idx2,]
+
+# Keep gene symbol AND ensembl in interaction table
+int_network$SYMBOL_A <- ids$hgnc_symbol[match(int_network$stringId_A,
+                                              ids$ensembl_peptide_id)]
+int_network$SYMBOL_B <- ids$hgnc_symbol[match(int_network$stringId_B,
+                                              ids$ensembl_peptide_id)]
+int_network$ENSG_A <- ids$ensembl_gene_id[match(int_network$stringId_A,
+                                              ids$ensembl_peptide_id)]
+int_network$ENSG_B <- ids$ensembl_gene_id[match(int_network$stringId_B,
+                                              ids$ensembl_peptide_id)]
+
+############
+# usar umas das opções apenas para correr o cemitool
+int_network_symbol <- int_network[, c("SYMBOL_A", "SYMBOL_B")]
+
+int_network_ensg <- int_network[, c("ENSG_A", "ENSG_B")]
+
+# PATHs
+head(paths)
+paths_nv <- unique(React_to_symbol[, c("path_name", "ensembl_gene_id")])
+colnames(paths_nv) <- c("term", "gene")
+
+############
+
+## Perform full analysis
+cem <- cemitool(matriz_counts_geral, gmt = paths_nv, interactions= int_network_ensg,
+                apply_vst = TRUE, verbose = TRUE, force_beta = T)
+
+# write files 
+generate_report(cem, directory="./Resultados_Coexpressão/Cemitool_Geral/Report", force = TRUE)
+write_files(cem, directory="./Resultados_Coexpressão/Cemitool_Geral/Tables", force = TRUE)
+save_plots(cem, "all", directory="./Resultados_Coexpressão/Cemitool_Geral/Plots", force = TRUE)
+```

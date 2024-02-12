@@ -1,0 +1,155 @@
+---
+title: "DiffCoexp_dp"
+output: html_document
+date: "2023-08-28"
+editor_options: 
+  chunk_output_type: console
+---
+
+# Pacotes e Dados
+
+```{r Dados, echo=TRUE, include=TRUE}
+library(DESeq2)
+library(edgeR)
+library(diffcoexp)
+
+setwd("/Users/tatiane/Library/CloudStorage/OneDrive-UniversidadeFederaldoPará-UFPA/DOUTORADO/2.RESULTADOS_TRANSCRIPTOMA/Parkinson_Tati/Coexpressao_DifCoexp_dp/")
+
+load("./dados_dp.RData")
+
+
+### AJUSTANDO A MATRIZ DE COUNTS - MODO 1 ##########################################################
+
+# Matriz completa de counts - Já normalizada (DESeq2) e filtrada 
+# (pelo menos 5 amostras com 5 reads)
+matriz <- counts_DP_filtered
+matriz <- matriz[,-1]
+
+
+### AJUSTANDO A MATRIZ DE COUNTS - MODO 2 ##########################################################
+### Realizar a normalização e filtragem:
+matriz <- counts_DP 
+genes_mantidos <- rowSums(matriz >= 5) >= 5
+matriz <- matriz[genes_mantidos,]
+# Adionar normalização edgeR
+### Normalizando a Matriz por Library Size Factors
+dge <- DGEList(counts = matriz)
+lib_size_factors <- calcNormFactors(dge, method = "TMM")
+normalizada_matriz <- cpm(dge, lib.size = lib_size_factors)
+
+
+
+### AJUSTANDO A MATRIZ DE COUNTS - MODO 3 ##########################################################
+
+# IMPORTANDO A MATRIZ DE COUNTS DIRETAMENTE DOS ARQUIVOS DE CONTAGEM HTSEQ
+diretorio <- "/Users/tatiane/Library/CloudStorage/OneDrive-UniversidadeFederaldoPará-UFPA/DOUTORADO/2.RESULTADOS_TRANSCRIPTOMA/Htseq_counts - Paired_Reads"
+arquivos <- list.files(diretorio, pattern=".count", full.names=TRUE)
+
+# Crie uma lista para armazenar as contagens
+lista_contagens <- lapply(arquivos, function(arquivo) {
+  dados <- read.delim(arquivo, header=FALSE, col.names=c("gene", gsub("_htseq.count", "", basename(arquivo))))
+  return(dados)
+})
+# Crie uma matriz de contagens combinando os dados
+matriz_contagem <- do.call(cbind, lista_contagens)
+
+# Defina o nome da linha como o gene
+rowns <- matriz_contagem$gene
+rownames(matriz_contagem) <- rowns
+# Remova todas as colunas chamadas "gene"
+matriz_contagem <- matriz_contagem[, !grepl("gene", colnames(matriz_contagem))]
+
+# Excluindo os valores zero
+genes_mantidos <- rowSums(matriz_contagem >= 5) >= 5
+matriz_contagem_filtrada <- matriz_contagem[genes_mantidos,]
+
+# Fazer normalização edgeR
+dge <- DGEList(counts = matriz_contagem_filtrada)
+lib_size_factors <- calcNormFactors(dge, method = "TMM")
+normalizada_matriz <- cpm(dge, lib.size = lib_size_factors)
+
+
+
+
+
+
+### Separando os grupos
+# CONTROLE
+control <- normalizada_matriz[,1:20]
+# CASO
+case <- as.data.frame(normalizada_matriz[, c("DP004T","DP039T","DP048T","DP066T","DP070T",
+                                          "DP081T","DP084T","DP095T","DP098T","DP100T",
+                                          "DP101T","DP103T","DP117T","DP127T","DP128T",
+                                          "DP006T","DP075T","DP078T","DP086T",
+                                          "DP087T","DP097T","DP110T","DP111T",
+                                          "DP114T","DP118T","DP120T")])
+# CASO COM DISCINESIA
+case_D <- as.data.frame(normalizada_matriz[, c("DP004T","DP039T","DP048T","DP066T","DP070T",
+                                             "DP081T","DP084T","DP095T","DP098T","DP100T",
+                                             "DP101T","DP103T","DP117T","DP127T","DP128T")])
+# CASO SEM DISCINESIA
+case_ND <- as.data.frame(normalizada_matriz[, c("DP006T","DP075T","DP078T","DP086T",
+                                             "DP087T","DP097T","DP110T","DP111T",
+                                             "DP114T","DP118T","DP120T")])
+
+save(control, case, case_ND, case_D, file = "./Matrizes_Counts_Normalizadas.RData")
+```
+
+# COEXPRESSÃO DIFERENCIAL - Controle X Caso com Discinesia
+
+```{r Dados, echo=TRUE, include=TRUE}
+# Control vs case_discin
+res_CT_DPd = diffcoexp(exprs.1 = control, exprs.2 = case_D, r.method = "spearman", q.method = "fdr", rth = 0.8, qth = 0.05)
+
+dcgs <- res_CT_DPd$DCGs
+dcls <- res_CT_DPd$DCLs
+write.table(dcls, file = "./DCL_res_CT_DPd.txt", sep = "\t", quote = F, row.names = F)
+write.table(dcgs, file = "./DCG_res_CT_DPd.txt", sep = "\t", quote = F, row.names = F)
+
+save(res_ctrl_D, file = "./res_CT_DPd.RData")
+
+```
+
+# COEXPRESSÃO DIFERENCIAL - Controle X Caso sem Discinesia
+
+```{r Dados, echo=TRUE, include=TRUE}
+#control vs case_nodisci
+res_CT_DPnd = diffcoexp(exprs.1 = control, exprs.2 = case_ND, r.method = "spearman", q.method = "fdr", rth = 0.8, qth = 0.05)
+
+dcgs1 <- res_CT_DPnd$DCGs
+dcls1 <- res_CT_DPnd$DCLs
+write.table(dcls1, file = "./DCL_res_CT_DPnd.txt", sep = "\t", quote = F, row.names = F)
+write.table(dcgs1, file = "./DCG_res_CT_DPnd.txt", sep = "\t", quote = F, row.names = F)
+
+save(res_CT_DPnd, file = "./res_CT_DPnd.RData")
+
+```
+
+# COEXPRESSÃO DIFERENCIAL - Caso_Discinesia X Caso_Sem_Discinesia
+
+```{r Dados, echo=TRUE, include=TRUE}
+#case_discin vs case_nodisci
+res_D_ND = diffcoexp(exprs.1 = case_ND, exprs.2 = case_D, r.method = "spearman", q.method = "fdr", rth = 0.8, qth = 0.05)
+
+dcgs2 <- res_D_ND$DCGs
+dcls2 <- res_D_ND$DCLs
+write.table(dcls2, file = "./Results_DiffCoesxp/DCL_ND_D.txt", sep = "\t", quote = F, row.names = F)
+write.table(dcgs2, file = "./Results_DiffCoesxp/DCG_ND_D.txt", sep = "\t", quote = F, row.names = F)
+
+save(res_D_ND, file = "./Results_DiffCoesxp/res_D_ND.RData")
+
+```
+
+# COEXPRESSÃO DIFERENCIAL - Controle X Caso
+
+```{r Dados, echo=TRUE, include=TRUE}
+#control vs case_discin
+res_ctrl_case = diffcoexp(exprs.1 = control, exprs.2 = case, r.method = "spearman", q.method = "fdr", rth = 0.8, qth = 0.05)
+
+dcgs <- res_ctrl_case$DCGs
+dcls <- res_ctrl_case$DCLs
+write.table(dcls, file = "./Results_DiffCoesxp/DCL_case_geral.txt", sep = "\t", quote = F, row.names = F)
+write.table(dcgs, file = "./Results_DiffCoesxp/DCG_case_geral.txt", sep = "\t", quote = F, row.names = F)
+
+save(res_ctrl_case, file = "./Results_DiffCoesxp/res_ctrl_case_geral.RData")
+```
